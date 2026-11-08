@@ -573,8 +573,9 @@ function drawPick() {
     const label = i === state.teacherIdx ? '先生' : i === state.beginnerIdx ? '初心者' : String(i + 1);
     personTag(ctx, p, label, i === state.teacherIdx ? COLOR.teacher : i === state.beginnerIdx ? COLOR.beginner : 'rgba(0,0,0,0.65)');
     if (ready) {
-      // つかめる点を、白いふちの丸で示す
-      const r = Math.max(5, Math.min(W, H) / 70);
+      // つかめる点を、白いふちの丸で示す。大きさはマークの設定に合わせる
+      // （つかむ判定は丸の大きさではなく、指を置いた位置に一番近い点で決める）
+      const r = $('mark').value === 'large' ? Math.max(5, Math.min(W, H) / 70) : Math.max(3, Math.min(W, H) / 150);
       ctx.lineWidth = Math.max(1.5, r / 3);
       ctx.strokeStyle = '#FFFFFF';
       ctx.fillStyle = color;
