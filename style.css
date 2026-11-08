@@ -111,6 +111,18 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 #pick-canvas { cursor: pointer; touch-action: manipulation; }
 #pick-canvas.editing { cursor: grab; touch-action: none; } /* 点をドラッグする間、画面がスクロールしないようにする */
 
+.notice {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.notice-title { font-weight: 700; color: var(--ink); margin-bottom: 4px; }
+.notice ul { margin: 0; padding-left: 1.2em; display: grid; gap: 4px; }
+.notice b { color: var(--ink); }
+
 .prompt { font-weight: 700; }
 .prompt .t { color: var(--teacher); }
 .prompt .b { color: var(--beginner); }
