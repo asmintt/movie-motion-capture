@@ -474,15 +474,18 @@ function drawSkeleton(ctx, p, color) {
   const top = { x: p[HEAD_TOP * 3], y: p[HEAD_TOP * 3 + 1] }, chin = { x: p[CHIN * 3], y: p[CHIN * 3 + 1] };
   segment(top, chin, hv, cv);
   segment(chin, neck, cv, neck.v);
-  // マーク（関節・頭頂部・鼻・顎先の丸）は白。自信が低い点は灰色。線の上に重ねて描く
+  // マーク（関節・頭頂部・鼻・顎先の丸）は線と同じ色で、白いふちを付ける。自信が低い点は灰色。線の上に重ねて描く
   const dots = [...JOINTS.map((i) => [i, 1.25]), [0, 1.4], [CHIN, 1.25], [HEAD_TOP, 1.25]];
+  ctx.strokeStyle = COLOR.mark;
+  ctx.lineWidth = Math.max(1, lw * 0.5);
   for (const [i, r] of dots) {
     const v = p[i * 3 + 2];
     if (v < 0.05) continue;
-    ctx.fillStyle = v >= VIS_MIN ? COLOR.mark : COLOR.low;
+    ctx.fillStyle = v >= VIS_MIN ? color : COLOR.low;
     ctx.beginPath();
     ctx.arc(p[i * 3] * W, p[i * 3 + 1] * H, lw * r, 0, Math.PI * 2);
     ctx.fill();
+    ctx.stroke();
   }
 }
 
