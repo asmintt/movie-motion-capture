@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#F4F5F7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#13171C" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="モーキャプ">
+<title>ムービー・モーションキャプチャ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header class="top">
+    <h1>ムービー・モーションキャプチャ</h1>
+    <p class="sub">先生と初心者が映った練習動画から、骨格つき動画（MP4）と骨格データ（CSV）を作ります。動画はこのiPhoneの中だけで処理されます。</p>
+  </header>
+
+  <!-- 1. 動画を選ぶ -->
+  <section class="step" id="step-file" data-state="active">
+    <h2><span class="num">1</span>動画を選ぶ</h2>
+    <label class="btn primary file-btn">
+      <input type="file" id="file" accept="video/*">
+      動画を選ぶ
+    </label>
+    <p class="hint" id="file-info">写真アプリから練習動画を選びます。1分以内がおすすめです。</p>
+    <video id="video" playsinline muted preload="auto" hidden></video>
+  </section>
+
+  <!-- 2. 設定 -->
+  <section class="step" id="step-settings" data-state="locked">
+    <h2><span class="num">2</span>設定を決める</h2>
+    <div class="preview-wrap"><video id="preview" playsinline muted controls preload="metadata"></video></div>
+    <div class="grid">
+      <label class="field">
+        <span>解析の開始（秒）</span>
+        <span class="row">
+          <input type="number" id="start" min="0" step="0.1" value="0" inputmode="decimal">
+          <button type="button" class="btn small" id="start-here">今の位置</button>
+        </span>
+      </label>
+      <label class="field">
+        <span>解析の終了（秒）</span>
+        <span class="row">
+          <input type="number" id="end" min="0" step="0.1" value="0" inputmode="decimal">
+          <button type="button" class="btn small" id="end-here">今の位置</button>
+        </span>
+      </label>
+      <label class="field">
+        <span>動画の速さ</span>
+        <select id="speed">
+          <option value="0.5" selected>0.5倍速（おすすめ）</option>
+          <option value="1">1倍速</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>AIの精度</span>
+        <select id="model">
+          <option value="full" selected>標準（full）</option>
+          <option value="heavy">高精度（heavy・時間がかかる）</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>なめらかさ</span>
+        <select id="fps">
+          <option value="30" selected>毎秒30コマ</option>
+          <option value="15">毎秒15コマ（速く終わる）</option>
+        </select>
+      </label>
+    </div>
+    <p class="hint">開始の位置で、次に先生と初心者を選びます。2人がはっきり映っているところを開始にしてください。</p>
+    <button type="button" class="btn primary" id="to-pick">この設定で人を選ぶ</button>
+  </section>
+
+  <!-- 3. 人を選ぶ -->
+  <section class="step" id="step-pick" data-state="locked">
+    <h2><span class="num">3</span>人を選ぶ</h2>
+    <p class="prompt" id="pick-prompt">AIを準備しています…</p>
+    <div class="canvas-wrap"><canvas id="pick-canvas"></canvas></div>
+    <div class="actions">
+      <button type="button" class="btn" id="pick-reset">選び直す</button>
+      <button type="button" class="btn primary" id="to-analyze" disabled>解析する</button>
+    </div>
+  </section>
+
+  <!-- 4. 解析 -->
+  <section class="step" id="step-analyze" data-state="locked">
+    <h2><span class="num">4</span>解析する</h2>
+    <div class="progress"><i id="analyze-bar"></i></div>
+    <p class="hint" id="analyze-info">終わるまでこの画面を開いたままにしてください。</p>
+  </section>
+
+  <!-- 5. 確認 -->
+  <section class="step" id="step-review" data-state="locked">
+    <h2><span class="num">5</span>取り違えを確かめる</h2>
+    <p class="hint">再生して、青（先生）とオレンジ（初心者）が入れ替わっていないか確かめます。入れ替わっていたら、そのコマで止めて「入れ替える」を押します。</p>
+    <div class="canvas-wrap"><canvas id="review-canvas"></canvas></div>
+    <input type="range" id="seek" min="0" max="1000" value="0" step="1" aria-label="再生位置">
+    <div class="actions">
+      <button type="button" class="btn" id="play">再生</button>
+      <span class="time" id="review-time">0.0秒</span>
+      <button type="button" class="btn" id="swap">ここから入れ替える</button>
+    </div>
+    <p class="hint" id="swap-info"></p>
+    <button type="button" class="btn primary" id="to-export">動画とCSVを作る</button>
+  </section>
+
+  <!-- 6. 保存 -->
+  <section class="step" id="step-export" data-state="locked">
+    <h2><span class="num">6</span>保存する</h2>
+    <div class="progress"><i id="export-bar"></i></div>
+    <p class="hint" id="export-info"></p>
+    <div class="preview-wrap" id="result-wrap" hidden><video id="result" playsinline controls loop></video></div>
+    <div class="actions">
+      <button type="button" class="btn primary" id="save-video" disabled>動画を保存</button>
+      <button type="button" class="btn primary" id="save-csv" disabled>CSVを保存</button>
+    </div>
+    <p class="hint">保存したCSVは、Claudeのプロジェクト「ダンス練習分析」に添えて「今日のレッスンを分析して」と頼みます。</p>
+  </section>
+
+  <footer class="foot">
+    <p>骨格検出：MediaPipe Pose（Google, Apache-2.0）。結果はAIの推定なので、練習では先生の判断を優先してください。</p>
+  </footer>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,831 @@
+// ムービー・モーションキャプチャ
+// 練習動画から先生と初心者の骨格を検出し、骨格つき動画（MP4）と骨格データ（CSV）を書き出す。
+// 処理はすべてブラウザの中で行い、動画はどこにも送らない。
+import { PoseLandmarker } from './lib/vision_bundle.mjs';
+import { Muxer, ArrayBufferTarget } from './lib/mp4-muxer.mjs';
+
+const APP_VERSION = 'v1';
+const MEDIAPIPE_VERSION = 'tasks-vision 0.10.14';
+
+const $ = (id) => document.getElementById(id);
+
+// 動画に焼き込む色（画面のテーマに関係なく固定）
+const COLOR = { teacher: '#3D7BFF', beginner: '#FF7A1A', low: 'rgba(190,198,207,0.75)', other: 'rgba(255,255,255,0.85)' };
+const VIS_MIN = 0.5;   // これ未満の点は「AIの自信が低い」として灰色で描く
+
+// CSVに書き出す点（MediaPipe Poseの33点のうち、分析に使うもの）
+const POINTS = {
+  nose: 0, left_ear: 7, right_ear: 8,
+  left_shoulder: 11, right_shoulder: 12, left_elbow: 13, right_elbow: 14, left_wrist: 15, right_wrist: 16,
+  left_hip: 23, right_hip: 24, left_knee: 25, right_knee: 26, left_ankle: 27, right_ankle: 28,
+  left_heel: 29, right_heel: 30, left_foot_index: 31, right_foot_index: 32,
+};
+const BONES = [
+  [11, 12], [11, 13], [13, 15], [12, 14], [14, 16],
+  [11, 23], [12, 24], [23, 24],
+  [23, 25], [25, 27], [24, 26], [26, 28],
+  [27, 29], [29, 31], [27, 31], [28, 30], [30, 32], [28, 32],
+];
+const JOINTS = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
+
+const state = {
+  file: null, name: '', url: null,
+  duration: 0, vw: 0, vh: 0, outW: 0, outH: 0,
+  start: 0, end: 0, speed: 0.5, model: 'full', fps: 30,
+  landmarker: null, landmarkerModel: null, delegate: '',
+  pickPoses: [], teacherIdx: null, beginnerIdx: null,
+  frames: [],   // { t, A, B }  A = 最初に先生として選んだ人、B = 最初に初心者として選んだ人
+  swaps: [],    // 役割を入れ替えた時刻（秒）
+  videoBlob: null, csvBlob: null,
+  busy: false,
+};
+window.__mmc = state; // 動作確認用
+
+const video = $('video');     // 解析用（画面には出さない）
+const preview = $('preview'); // 設定用のプレビュー
+
+// ---------- 画面の状態 ----------
+const STEPS = ['step-file', 'step-settings', 'step-pick', 'step-analyze', 'step-review', 'step-export'];
+function setStep(id, s) { $(id).dataset.state = s; }
+function lockFrom(id) {
+  for (const s of STEPS.slice(STEPS.indexOf(id))) setStep(s, 'locked');
+}
+function message(id, text, isError = false) {
+  const el = $(id);
+  el.textContent = text;
+  el.classList.toggle('error', isError);
+}
+const nextPaint = () => new Promise((r) => requestAnimationFrame(() => r()));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+let wakeLock = null;
+async function keepAwake(on) {
+  try {
+    if (on && 'wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+    if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch { /* 使えない端末では何もしない */ }
+}
+
+// ---------- 動画 ----------
+function once(el, ok, ng = 'error', ms = 15000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { clean(); reject(new Error('timeout')); }, ms);
+    const onOk = () => { clean(); resolve(); };
+    const onNg = () => { clean(); reject(new Error(ng)); };
+    function clean() { clearTimeout(timer); el.removeEventListener(ok, onOk); el.removeEventListener(ng, onNg); }
+    el.addEventListener(ok, onOk);
+    el.addEventListener(ng, onNg);
+  });
+}
+
+// 指定の時刻へ移動し、そのコマが描ける状態になるまで待つ
+function seekTo(v, t) {
+  return new Promise((resolve) => {
+    let finished = false;
+    const finish = () => { if (!finished) { finished = true; v.removeEventListener('seeked', onSeeked); clearTimeout(guard); resolve(); } };
+    const onSeeked = () => {
+      if (v.requestVideoFrameCallback) {
+        v.requestVideoFrameCallback(() => finish());
+        setTimeout(finish, 150);
+      } else {
+        finish();
+      }
+    };
+    const guard = setTimeout(finish, 4000);
+    v.addEventListener('seeked', onSeeked);
+    v.currentTime = Math.max(0, Math.min(t, v.duration - 0.001));
+  });
+}
+
+async function handleFile(file) {
+  if (!file) return;
+  stopReview();
+  state.file = file;
+  state.name = file.name || 'video';
+  if (state.url) URL.revokeObjectURL(state.url);
+  state.url = URL.createObjectURL(file);
+  lockFrom('step-settings');
+  message('file-info', '動画を読み込んでいます…');
+  try {
+    video.src = state.url;
+    preview.src = state.url;
+    video.load();
+    await once(video, 'loadeddata');
+  } catch {
+    message('file-info', 'この動画は開けませんでした。別の動画を選んでください。', true);
+    return;
+  }
+  state.duration = video.duration;
+  state.vw = video.videoWidth;
+  state.vh = video.videoHeight;
+  // 書き出しサイズ：短い辺を最大720、長い辺を最大1280に縮める（偶数にそろえる）
+  const scale = Math.min(1, 720 / Math.min(state.vw, state.vh), 1280 / Math.max(state.vw, state.vh));
+  state.outW = Math.max(2, Math.round(state.vw * scale / 2) * 2);
+  state.outH = Math.max(2, Math.round(state.vh * scale / 2) * 2);
+
+  $('start').value = '0';
+  $('end').value = (Math.floor(state.duration * 10) / 10).toFixed(1);
+  $('start').max = $('end').max = state.duration.toFixed(1);
+  const long = state.duration > 60 ? '　1分を超えています。解析する範囲を短くするのがおすすめです。' : '';
+  message('file-info', `${state.name}（${state.duration.toFixed(1)}秒・${state.vw}×${state.vh}）${long}`);
+  setStep('step-file', 'done');
+  setStep('step-settings', 'active');
+}
+
+$('file').addEventListener('change', (e) => handleFile(e.target.files[0]));
+$('start-here').addEventListener('click', () => { $('start').value = preview.currentTime.toFixed(1); invalidate(); });
+$('end-here').addEventListener('click', () => { $('end').value = preview.currentTime.toFixed(1); invalidate(); });
+for (const id of ['start', 'end', 'speed', 'model', 'fps']) $(id).addEventListener('change', invalidate);
+
+// 設定を変えたら、それより後のステップはやり直し
+function invalidate() {
+  if (state.busy) return;
+  if ($('step-pick').dataset.state !== 'locked') {
+    stopReview();
+    lockFrom('step-pick');
+    setStep('step-settings', 'active');
+  }
+}
+
+function readSettings() {
+  const start = Number($('start').value);
+  const end = Number($('end').value);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end > state.duration + 0.05 || end - start < 0.5) {
+    throw new Error(`開始と終了は 0〜${state.duration.toFixed(1)} 秒の間で、0.5秒以上あけてください。`);
+  }
+  state.start = start;
+  state.end = Math.min(end, state.duration);
+  state.speed = Number($('speed').value);
+  state.model = $('model').value;
+  state.fps = Number($('fps').value);
+}
+
+// ---------- 骨格検出（MediaPipe Pose） ----------
+const asset = (p) => new URL(p, location.href).href;
+
+async function getLandmarker(model, forceCpu = false) {
+  if (state.landmarker && state.landmarkerModel === model && !forceCpu) return state.landmarker;
+  state.landmarker?.close();
+  state.landmarker = null;
+  const fileset = {
+    wasmLoaderPath: asset('lib/wasm/vision_wasm_internal.js'),
+    wasmBinaryPath: asset('lib/wasm/vision_wasm_internal.wasm'),
+  };
+  const options = (delegate) => ({
+    baseOptions: { modelAssetPath: asset(`lib/models/pose_landmarker_${model}.task`), delegate },
+    runningMode: 'IMAGE', // 切り出す範囲が毎回変わるので、コマごとに独立して検出する
+    numPoses: 2,
+    minPoseDetectionConfidence: 0.4,
+    minPosePresenceConfidence: 0.4,
+    minTrackingConfidence: 0.4,
+  });
+  let lm = null;
+  if (!forceCpu) {
+    try { lm = await PoseLandmarker.createFromOptions(fileset, options('GPU')); state.delegate = 'GPU'; } catch { lm = null; }
+  }
+  if (!lm) { lm = await PoseLandmarker.createFromOptions(fileset, options('CPU')); state.delegate = 'CPU'; }
+  state.landmarker = lm;
+  state.landmarkerModel = model;
+  return lm;
+}
+
+// 1人分の33点を [x, y, 自信] ×33 の配列にまとめる（x, y は 0〜1）
+function pack(landmarks) {
+  const a = new Float32Array(33 * 3);
+  landmarks.forEach((p, i) => { a[i * 3] = p.x; a[i * 3 + 1] = p.y; a[i * 3 + 2] = p.visibility ?? 1; });
+  return a;
+}
+
+async function detect(src) {
+  try {
+    return state.landmarker.detect(src).landmarks.map(pack);
+  } catch (e) {
+    if (state.delegate !== 'GPU') throw e;
+    await getLandmarker(state.model, true); // GPUで失敗したらCPUでやり直す
+    return state.landmarker.detect(src).landmarks.map(pack);
+  }
+}
+
+// 画面全体だと、遠い人・暗い服の人を見落とすことがある。
+// そこで範囲を切り出し、正方形に拡大してから検出する（座標は画面全体の 0〜1 に戻す）
+const CROP = 512;
+const cropCanvas = document.createElement('canvas');
+cropCanvas.width = cropCanvas.height = CROP;
+
+async function detectRegion(x0, y0, w, h) {
+  const ctx = cropCanvas.getContext('2d');
+  const s = CROP / Math.max(w, h);
+  const ox = (CROP - w * s) / 2, oy = (CROP - h * s) / 2;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, CROP, CROP);
+  ctx.drawImage(video, x0, y0, w, h, ox, oy, w * s, h * s);
+  const poses = await detect(cropCanvas);
+  for (const p of poses) {
+    for (let i = 0; i < 33; i++) {
+      p[i * 3] = (x0 + (p[i * 3] * CROP - ox) / s) / state.vw;
+      p[i * 3 + 1] = (y0 + (p[i * 3 + 1] * CROP - oy) / s) / state.vh;
+    }
+  }
+  return poses;
+}
+
+// 中心 c（0〜1）、幅 w・高さ h（ピクセル）の範囲を、画面からはみ出さないように切り出して検出
+function detectAround(c, size) {
+  const w = Math.min(size.w, state.vw), h = Math.min(size.h, state.vh);
+  const x0 = Math.max(0, Math.min(state.vw - w, c.x * state.vw - w / 2));
+  const y0 = Math.max(0, Math.min(state.vh - h, c.y * state.vh - h / 2));
+  return detectRegion(x0, y0, w, h);
+}
+
+// その人の形に合わせた切り出しの大きさ（ピクセル）。
+// 広すぎると隣の人が入り、見落としや取り違えが起きるので、立った人に合わせて縦長にする
+function cropSize(p) {
+  const b = bbox(p);
+  const bw = (b.x1 - b.x0) * state.vw, bh = (b.y1 - b.y0) * state.vh;
+  const min = Math.min(state.vw, state.vh) * 0.3;
+  return { w: Math.max(bw * 2, bh * 0.8, min), h: Math.max(bh * 1.35, bw * 1.2, min) };
+}
+
+const meanVis = (p) => { let s = 0; for (let i = 0; i < 33; i++) s += p[i * 3 + 2]; return s / 33; };
+
+// 画面全体と、横（縦長の動画なら縦）にずらした範囲で人を探し、同じ人をまとめる
+async function findPeople() {
+  const { vw, vh } = state;
+  const found = await detectRegion(0, 0, vw, vh);
+  const side = Math.min(vw, vh);
+  const long = Math.max(vw, vh);
+  for (let pos = 0; ; pos += side / 3) {
+    const p0 = Math.min(pos, long - side);
+    found.push(...(vw >= vh ? await detectRegion(p0, 0, side, side) : await detectRegion(0, p0, side, side)));
+    if (p0 >= long - side) break;
+  }
+  const people = [];
+  for (const p of found.sort((a, b) => meanVis(b) - meanVis(a))) {
+    if (!people.some((q) => dist(center(q), center(p)) < 0.06)) people.push(p);
+  }
+  return people.sort((a, b) => center(a).x - center(b).x);
+}
+
+const px = (p, i) => ({ x: p[i * 3] * state.vw, y: p[i * 3 + 1] * state.vh, v: p[i * 3 + 2] });
+
+function center(p) {
+  let x = 0, y = 0, n = 0;
+  for (const i of [11, 12, 23, 24]) if (p[i * 3 + 2] > 0.3) { x += p[i * 3]; y += p[i * 3 + 1]; n++; }
+  if (!n) for (let i = 0; i < 33; i++) { x += p[i * 3]; y += p[i * 3 + 1]; n++; }
+  return { x: x / n, y: y / n };
+}
+function bbox(p) {
+  let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+  for (let i = 0; i < 33; i++) {
+    if (p[i * 3 + 2] < 0.3) continue;
+    x0 = Math.min(x0, p[i * 3]); x1 = Math.max(x1, p[i * 3]);
+    y0 = Math.min(y0, p[i * 3 + 1]); y1 = Math.max(y1, p[i * 3 + 1]);
+  }
+  return { x0, y0, x1, y1 };
+}
+// 画面の縦横比を考えた距離（0〜1）
+function dist(a, b) {
+  const m = Math.max(state.vw, state.vh);
+  return Math.hypot((a.x - b.x) * state.vw / m, (a.y - b.y) * state.vh / m);
+}
+
+// 前のコマの位置に一番近い人を同じ人とみなす。遠すぎる場合は「見失った」とする
+const MISS = 0.18;
+function nearest(poses, prev, avoid) {
+  let best = null, bestD = MISS;
+  for (const p of poses) {
+    const c = center(p);
+    if (avoid && dist(c, avoid) < 0.05) continue; // もう1人と同じ人は選ばない
+    const d = dist(c, prev);
+    if (d < bestD) { bestD = d; best = p; }
+  }
+  return best;
+}
+
+// 1人ずつ、前のコマの位置の周りを切り出して探す
+async function trackFrame(prevA, prevB) {
+  const A = nearest(await detectAround(center(prevA), cropSize(prevA)), center(prevA), null);
+  const B = nearest(await detectAround(center(prevB), cropSize(prevB)), center(prevB), A ? center(A) : null);
+  return { A, B };
+}
+
+// ---------- 描画 ----------
+function drawSkeleton(ctx, p, color) {
+  if (!p) return;
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  const lw = Math.max(2, Math.round(Math.min(W, H) / 170));
+  ctx.lineCap = 'round';
+  ctx.lineWidth = lw;
+  for (const [i, j] of BONES) {
+    const vi = p[i * 3 + 2], vj = p[j * 3 + 2];
+    if (vi < 0.05 || vj < 0.05) continue;
+    ctx.strokeStyle = vi >= VIS_MIN && vj >= VIS_MIN ? color : COLOR.low;
+    ctx.beginPath();
+    ctx.moveTo(p[i * 3] * W, p[i * 3 + 1] * H);
+    ctx.lineTo(p[j * 3] * W, p[j * 3 + 1] * H);
+    ctx.stroke();
+  }
+  for (const i of JOINTS) {
+    const v = p[i * 3 + 2];
+    if (v < 0.05) continue;
+    ctx.fillStyle = v >= VIS_MIN ? color : COLOR.low;
+    ctx.beginPath();
+    ctx.arc(p[i * 3] * W, p[i * 3 + 1] * H, lw * 1.25, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // 頭の位置（鼻）に小さな丸
+  if (p[2] >= 0.05) {
+    ctx.fillStyle = p[2] >= VIS_MIN ? color : COLOR.low;
+    ctx.beginPath();
+    ctx.arc(p[0] * W, p[1] * H, lw * 1.8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function tag(ctx, text, x, y, bg) {
+  const H = ctx.canvas.height, W = ctx.canvas.width;
+  const fs = Math.max(12, Math.round(Math.min(W, H) / 26));
+  ctx.font = `700 ${fs}px "BIZ UDPGothic", "Hiragino Sans", sans-serif`;
+  const w = ctx.measureText(text).width + fs * 0.8, h = fs * 1.5;
+  const bx = Math.min(Math.max(x - w / 2, 2), W - w - 2), by = Math.max(y - h, 2);
+  ctx.fillStyle = bg;
+  ctx.beginPath();
+  ctx.roundRect ? ctx.roundRect(bx, by, w, h, h / 3) : ctx.rect(bx, by, w, h);
+  ctx.fill();
+  ctx.fillStyle = '#FFFFFF';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, bx + fs * 0.4, by + h / 2);
+}
+
+function personTag(ctx, p, text, color) {
+  if (!p) return;
+  const b = bbox(p);
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  tag(ctx, text, ((b.x0 + b.x1) / 2) * W, b.y0 * H - Math.min(W, H) / 40, color);
+}
+
+function rolesOf(frame) {
+  const flips = state.swaps.filter((s) => s <= frame.t + 1e-6).length;
+  return flips % 2 ? { teacher: frame.B, beginner: frame.A, swapped: true } : { teacher: frame.A, beginner: frame.B, swapped: false };
+}
+
+function drawScene(ctx, frame) {
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  ctx.drawImage(video, 0, 0, W, H);
+  if (!frame) return;
+  const r = rolesOf(frame);
+  drawSkeleton(ctx, r.beginner, COLOR.beginner);
+  drawSkeleton(ctx, r.teacher, COLOR.teacher);
+  personTag(ctx, r.teacher, '先生', COLOR.teacher);
+  personTag(ctx, r.beginner, '初心者', COLOR.beginner);
+  const speed = state.speed === 1 ? '1倍速' : `${state.speed}倍速`;
+  tag(ctx, `${speed}　${frame.t.toFixed(1)}秒`, 0, Math.min(W, H) / 12, 'rgba(0,0,0,0.6)');
+}
+
+function frameAt(t) {
+  if (!state.frames.length) return null;
+  const i = Math.round((t - state.start) * state.fps);
+  return state.frames[Math.max(0, Math.min(state.frames.length - 1, i))];
+}
+
+// ---------- 3. 人を選ぶ ----------
+const pickCanvas = $('pick-canvas');
+
+function pickPrompt() {
+  const el = $('pick-prompt');
+  el.classList.remove('error');
+  if (state.pickPoses.length < 2 && state.beginnerIdx === null) {
+    const who = state.teacherIdx === null ? '<span class="t">先生</span>' : '<span class="b">初心者</span>';
+    el.innerHTML = `${state.pickPoses.length}人しか見つかっていません。${who}をタップすると、その周りを探し直します。見つからないときは開始の位置を変えてください。`;
+  } else if (state.teacherIdx === null) {
+    el.innerHTML = '<span class="t">先生</span>をタップしてください';
+  } else if (state.beginnerIdx === null) {
+    el.innerHTML = '次に<span class="b">初心者</span>をタップしてください';
+  } else {
+    el.textContent = '選べました。「解析する」を押してください';
+  }
+  $('to-analyze').disabled = state.teacherIdx === null || state.beginnerIdx === null;
+}
+
+function drawPick() {
+  const ctx = pickCanvas.getContext('2d');
+  ctx.drawImage(video, 0, 0, pickCanvas.width, pickCanvas.height);
+  state.pickPoses.forEach((p, i) => {
+    const color = i === state.teacherIdx ? COLOR.teacher : i === state.beginnerIdx ? COLOR.beginner : COLOR.other;
+    drawSkeleton(ctx, p, color);
+    const label = i === state.teacherIdx ? '先生' : i === state.beginnerIdx ? '初心者' : String(i + 1);
+    personTag(ctx, p, label, i === state.teacherIdx ? COLOR.teacher : i === state.beginnerIdx ? COLOR.beginner : 'rgba(0,0,0,0.65)');
+  });
+  pickPrompt();
+}
+
+$('to-pick').addEventListener('click', async () => {
+  try {
+    readSettings();
+  } catch (e) {
+    message('file-info', e.message, true);
+    return;
+  }
+  // iPhoneでは、ボタンを押した直後に一度再生しておくとコマの移動が安定する
+  video.play().then(() => video.pause()).catch(() => {});
+  stopReview();
+  lockFrom('step-pick');
+  setStep('step-settings', 'done');
+  setStep('step-pick', 'active');
+  state.teacherIdx = state.beginnerIdx = null;
+  state.pickPoses = [];
+  pickCanvas.width = state.outW;
+  pickCanvas.height = state.outH;
+  $('to-analyze').disabled = true;
+  const el = $('pick-prompt');
+  el.classList.remove('error');
+  el.textContent = 'AIを準備しています（初回は少し時間がかかります）…';
+  try {
+    state.busy = true;
+    await getLandmarker(state.model);
+    el.textContent = '人を探しています…';
+    await seekTo(video, state.start);
+    state.pickPoses = await findPeople();
+    drawPick();
+  } catch (e) {
+    console.error(e);
+    el.textContent = `AIを動かせませんでした（${e.message}）。ページを読み込み直してください。`;
+    el.classList.add('error');
+  } finally {
+    state.busy = false;
+  }
+});
+
+function poseAt(pt) {
+  let best = -1, bestD = Infinity;
+  state.pickPoses.forEach((p, i) => {
+    if (i === state.teacherIdx) return;
+    const b = bbox(p);
+    const inside = pt.x >= b.x0 && pt.x <= b.x1 && pt.y >= b.y0 && pt.y <= b.y1;
+    const d = inside ? 0 : dist(pt, center(p));
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return bestD <= 0.12 ? best : -1;
+}
+
+pickCanvas.addEventListener('click', async (e) => {
+  if (state.busy || state.beginnerIdx !== null || !state.landmarker) return;
+  const r = pickCanvas.getBoundingClientRect();
+  const pt = { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+  let best = poseAt(pt);
+  if (best < 0) {
+    // 見つかっていない人をタップしたときは、その周りを切り出して探し直す
+    state.busy = true;
+    try {
+      const side = Math.min(state.vw, state.vh);
+      const more = await detectAround(pt, { w: side * 0.6, h: side });
+      for (const p of more) {
+        if (!state.pickPoses.some((q) => dist(center(q), center(p)) < 0.06)) state.pickPoses.push(p);
+      }
+    } finally {
+      state.busy = false;
+    }
+    best = poseAt(pt);
+    if (best < 0) { drawPick(); return; }
+  }
+  if (state.teacherIdx === null) state.teacherIdx = best;
+  else state.beginnerIdx = best;
+  drawPick();
+});
+
+$('pick-reset').addEventListener('click', () => {
+  state.teacherIdx = state.beginnerIdx = null;
+  if (state.pickPoses.length) drawPick();
+});
+
+// ---------- 4. 解析 ----------
+$('to-analyze').addEventListener('click', async () => {
+  setStep('step-pick', 'done');
+  setStep('step-analyze', 'active');
+  lockFrom('step-review');
+  state.busy = true;
+  await keepAwake(true);
+  try {
+    await analyze();
+    setStep('step-analyze', 'done');
+    await setupReview();
+  } catch (e) {
+    console.error(e);
+    message('analyze-info', `解析が止まりました（${e.message}）。もう一度「解析する」を押してください。`, true);
+    setStep('step-pick', 'active');
+  } finally {
+    state.busy = false;
+    keepAwake(false);
+  }
+});
+
+async function analyze() {
+  const step = 1 / state.fps;
+  const n = Math.floor((state.end - state.start) / step + 1e-6) + 1;
+  const bar = $('analyze-bar');
+  state.frames = [];
+  state.swaps = [];
+  let prevA = state.pickPoses[state.teacherIdx];
+  let prevB = state.pickPoses[state.beginnerIdx];
+  let lostA = 0, lostB = 0;
+  const t0 = performance.now();
+  message('analyze-info', '終わるまでこの画面を開いたままにしてください。');
+  for (let i = 0; i < n; i++) {
+    const t = state.start + i * step;
+    await seekTo(video, t);
+    const { A, B } = await trackFrame(prevA, prevB);
+    if (A) prevA = A; else lostA++;
+    if (B) prevB = B; else lostB++;
+    state.frames.push({ t, A, B });
+    if (i % 3 === 0 || i === n - 1) {
+      bar.style.width = `${((i + 1) / n) * 100}%`;
+      const left = ((performance.now() - t0) / (i + 1)) * (n - i - 1) / 1000;
+      message('analyze-info', `${i + 1} / ${n} コマ　あと約${Math.ceil(left)}秒（この画面を開いたままにしてください）`);
+      await nextPaint();
+    }
+  }
+  const sec = ((performance.now() - t0) / 1000).toFixed(0);
+  const lost = (lostA + lostB) ? `　見失ったコマ：先生 ${lostA}・初心者 ${lostB}` : '';
+  message('analyze-info', `解析が終わりました（${n}コマ・${sec}秒・${state.delegate}）。${lost}`);
+}
+
+// ---------- 5. 確認 ----------
+const reviewCanvas = $('review-canvas');
+let playing = false;
+
+async function setupReview() {
+  reviewCanvas.width = state.outW;
+  reviewCanvas.height = state.outH;
+  setStep('step-review', 'active');
+  updateSwapInfo();
+  await showAt(state.start);
+}
+
+async function showAt(t) {
+  await seekTo(video, t);
+  renderReview();
+}
+
+function renderReview() {
+  const t = video.currentTime;
+  drawScene(reviewCanvas.getContext('2d'), frameAt(t));
+  $('review-time').textContent = `${t.toFixed(1)}秒`;
+  $('seek').value = String(Math.round(((t - state.start) / (state.end - state.start)) * 1000));
+}
+
+function loop() {
+  if (!playing) return;
+  if (video.currentTime >= state.end - 0.01 || video.ended) {
+    stopReview();
+    showAt(state.start);
+    return;
+  }
+  renderReview();
+  requestAnimationFrame(loop);
+}
+
+function stopReview() {
+  if (!playing) return;
+  playing = false;
+  video.pause();
+  $('play').textContent = '再生';
+}
+
+$('play').addEventListener('click', async () => {
+  if (playing) { stopReview(); return; }
+  if (video.currentTime >= state.end - 0.05 || video.currentTime < state.start) await seekTo(video, state.start);
+  video.playbackRate = state.speed;
+  try { await video.play(); } catch { return; }
+  playing = true;
+  $('play').textContent = '止める';
+  requestAnimationFrame(loop);
+});
+
+$('seek').addEventListener('input', async (e) => {
+  stopReview();
+  const t = state.start + (state.end - state.start) * (Number(e.target.value) / 1000);
+  await showAt(t);
+});
+
+$('swap').addEventListener('click', () => {
+  stopReview();
+  const f = frameAt(video.currentTime);
+  if (!f) return;
+  const t = Number(f.t.toFixed(3));
+  const at = state.swaps.findIndex((s) => Math.abs(s - t) < 1e-3);
+  if (at >= 0) state.swaps.splice(at, 1); else state.swaps.push(t);
+  state.swaps.sort((x, y) => x - y);
+  updateSwapInfo();
+  renderReview();
+});
+
+function updateSwapInfo() {
+  const el = $('swap-info');
+  el.textContent = state.swaps.length
+    ? `入れ替え：${state.swaps.map((s) => `${s.toFixed(1)}秒`).join('、')} から（同じ位置でもう一度押すと取り消し）`
+    : '';
+}
+
+// ---------- 6. 書き出し ----------
+$('to-export').addEventListener('click', async () => {
+  stopReview();
+  setStep('step-review', 'done');
+  setStep('step-export', 'active');
+  $('save-video').disabled = $('save-csv').disabled = true;
+  $('result-wrap').hidden = true;
+  state.busy = true;
+  await keepAwake(true);
+  try {
+    state.csvBlob = new Blob(['﻿' + buildCsv()], { type: 'text/csv' });
+    $('save-csv').disabled = false;
+    state.videoBlob = await encodeVideo();
+    const url = URL.createObjectURL(state.videoBlob);
+    $('result').src = url;
+    $('result-wrap').hidden = false;
+    $('save-video').disabled = false;
+    message('export-info', `できました（動画 ${(state.videoBlob.size / 1e6).toFixed(1)}MB）。下のボタンで保存します。`);
+  } catch (e) {
+    console.error(e);
+    message('export-info', e.message, true);
+  } finally {
+    state.busy = false;
+    keepAwake(false);
+    setStep('step-review', 'active');
+  }
+});
+
+async function pickCodec(config) {
+  for (const codec of ['avc1.640028', 'avc1.4d0028', 'avc1.42e028', 'avc1.42e01f']) {
+    try {
+      const r = await VideoEncoder.isConfigSupported({ ...config, codec });
+      if (r.supported) return codec;
+    } catch { /* 次を試す */ }
+  }
+  return null;
+}
+
+async function encodeVideo() {
+  if (!('VideoEncoder' in window)) {
+    throw new Error('このブラウザは動画の書き出しに対応していません。iPhoneはiOS 16.4以降のSafariで開いてください。CSVは保存できます。');
+  }
+  const W = state.outW, H = state.outH;
+  const outFps = state.fps * state.speed; // 0.5倍速では1コマを2倍の長さで見せる
+  const base = { width: W, height: H, bitrate: Math.max(1_500_000, Math.round(W * H * outFps * 0.25)), framerate: outFps };
+  const codec = await pickCodec(base);
+  if (!codec) throw new Error('この端末ではMP4（H.264）を書き出せませんでした。CSVは保存できます。');
+
+  const target = new ArrayBufferTarget();
+  const muxer = new Muxer({ target, video: { codec: 'avc', width: W, height: H, frameRate: outFps }, fastStart: 'in-memory' });
+  let failure = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: (e) => { failure = e; },
+  });
+  encoder.configure({ ...base, codec, avc: { format: 'avc' } });
+
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  const bar = $('export-bar');
+  const n = state.frames.length;
+  const dur = 1e6 / outFps;
+  for (let i = 0; i < n; i++) {
+    if (failure) throw failure;
+    const f = state.frames[i];
+    await seekTo(video, f.t);
+    drawScene(ctx, f);
+    const vf = new VideoFrame(canvas, { timestamp: Math.round(i * dur), duration: Math.round(dur) });
+    encoder.encode(vf, { keyFrame: i % Math.max(1, Math.round(outFps * 2)) === 0 });
+    vf.close();
+    while (encoder.encodeQueueSize > 6) await sleep(4);
+    if (i % 3 === 0 || i === n - 1) {
+      bar.style.width = `${((i + 1) / n) * 100}%`;
+      message('export-info', `動画を作っています　${i + 1} / ${n} コマ`);
+      await nextPaint();
+    }
+  }
+  await encoder.flush();
+  if (failure) throw failure;
+  encoder.close();
+  muxer.finalize();
+  return new Blob([target.buffer], { type: 'video/mp4' });
+}
+
+// ---------- CSV ----------
+function angle3(a, b, c) {
+  const v1 = { x: a.x - b.x, y: a.y - b.y }, v2 = { x: c.x - b.x, y: c.y - b.y };
+  const d = Math.hypot(v1.x, v1.y) * Math.hypot(v2.x, v2.y);
+  if (!d) return '';
+  return Math.acos(Math.max(-1, Math.min(1, (v1.x * v2.x + v1.y * v2.y) / d))) * 180 / Math.PI;
+}
+// 二の腕の角度：真下が0°、肩の高さが90°
+function armRaise(sh, el) {
+  const v = { x: el.x - sh.x, y: el.y - sh.y };
+  const d = Math.hypot(v.x, v.y);
+  if (!d) return '';
+  return Math.acos(Math.max(-1, Math.min(1, v.y / d))) * 180 / Math.PI;
+}
+const r1 = (n) => (n === '' ? '' : Math.round(n * 10) / 10);
+const r2 = (n) => Math.round(n * 100) / 100;
+
+function measures(p) {
+  const P = (i) => px(p, i);
+  const mid = (i, j) => ({ x: (P(i).x + P(j).x) / 2, y: (P(i).y + P(j).y) / 2 });
+  const sh = mid(11, 12), hip = mid(23, 24);
+  const tilt = Math.atan2(Math.abs(P(11).y - P(12).y), Math.abs(P(11).x - P(12).x)) * 180 / Math.PI;
+  return [
+    Math.hypot(sh.x - hip.x, sh.y - hip.y),
+    angle3(P(23), P(25), P(27)), angle3(P(24), P(26), P(28)),
+    angle3(P(11), P(13), P(15)), angle3(P(12), P(14), P(16)),
+    armRaise(P(11), P(13)), armRaise(P(12), P(14)),
+    tilt,
+  ].map(r1);
+}
+
+function csvCell(v) {
+  const s = String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function buildCsv() {
+  const names = Object.keys(POINTS);
+  const header = [
+    'time_s', 'role', 'tracked_id', 'swapped',
+    ...names.flatMap((n) => [`${n}_x`, `${n}_y`, `${n}_vis`]),
+    'torso_px', 'knee_angle_left', 'knee_angle_right', 'elbow_angle_left', 'elbow_angle_right',
+    'arm_raise_left', 'arm_raise_right', 'shoulder_tilt',
+  ];
+  const lines = [
+    `# movie-motion-capture ${APP_VERSION}`,
+    `# source_file: ${state.name}`,
+    `# created: ${new Date().toISOString()}`,
+    `# video_size_px: ${state.vw}x${state.vh}`,
+    `# video_duration_s: ${state.duration.toFixed(2)}`,
+    `# analyzed_range_s: ${state.start.toFixed(1)}-${state.end.toFixed(1)}`,
+    `# analysis_fps: ${state.fps} / sample_interval_s: 0.1`,
+    `# model: MediaPipe Pose Landmarker ${state.model} (${MEDIAPIPE_VERSION}, ${state.delegate})`,
+    '# coords: pixels of the source video, origin top-left, y down. *_vis = AI confidence 0-1 (below 0.5 is unreliable)',
+    '# angles_deg: knee/elbow = 3-point angle (180 = straight). arm_raise = upper arm from straight down (0 = down, 90 = shoulder height). shoulder_tilt = shoulder line from horizontal',
+    '# left/right: the person\'s own left/right as detected by the AI (a mirrored video stays mirrored)',
+    '# tracked_id: A = person picked as teacher at the start, B = person picked as beginner. swapped = 1 after the user swapped roles',
+    `# role_swaps_at_s: ${state.swaps.length ? state.swaps.map((s) => s.toFixed(1)).join(' ') : 'none'}`,
+    '# empty row values = the person was not found in that frame',
+    header.join(','),
+  ];
+  for (let k = 0; ; k++) {
+    const t = state.start + k * 0.1;
+    if (t > state.end + 1e-6) break;
+    const f = frameAt(t);
+    const r = rolesOf(f);
+    for (const role of ['teacher', 'beginner']) {
+      const p = r[role];
+      const id = (role === 'teacher') !== r.swapped ? 'A' : 'B';
+      const row = [t.toFixed(1), role, id, r.swapped ? 1 : 0];
+      if (p) {
+        for (const n of names) {
+          const q = px(p, POINTS[n]);
+          row.push(r1(q.x), r1(q.y), r2(q.v));
+        }
+        row.push(...measures(p));
+      } else {
+        row.push(...new Array(names.length * 3 + 8).fill(''));
+      }
+      lines.push(row.map(csvCell).join(','));
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
+// ---------- 保存 ----------
+function baseName() {
+  return state.name.replace(/\.[^.]+$/, '') || 'video';
+}
+
+async function saveBlob(blob, filename) {
+  const file = new File([blob], filename, { type: blob.type });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({ files: [file] });
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+    }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+}
+
+$('save-video').addEventListener('click', () => state.videoBlob && saveBlob(state.videoBlob, `${baseName()}_skeleton.mp4`));
+$('save-csv').addEventListener('click', () => state.csvBlob && saveBlob(state.csvBlob, `${baseName()}_pose.csv`));
+
+// 動作確認用：?src=動画のURL で動画を読み込む
+const testSrc = new URLSearchParams(location.search).get('src');
+if (testSrc) {
+  fetch(testSrc).then((r) => r.blob()).then((b) => handleFile(new File([b], testSrc.split('/').pop(), { type: b.type || 'video/mp4' })));
+}
