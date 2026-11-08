@@ -109,6 +109,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 }
 .preview-wrap video, .canvas-wrap canvas { display: block; max-width: 100%; max-height: 60vh; width: auto; height: auto; }
 #pick-canvas { cursor: pointer; touch-action: manipulation; }
+#pick-canvas.editing { cursor: grab; touch-action: none; } /* 点をドラッグする間、画面がスクロールしないようにする */
 
 .prompt { font-weight: 700; }
 .prompt .t { color: var(--teacher); }

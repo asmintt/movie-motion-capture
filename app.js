@@ -12,6 +12,7 @@ const $ = (id) => document.getElementById(id);
 // 動画に焼き込む色（画面のテーマに関係なく固定）
 const COLOR = { teacher: '#3D7BFF', beginner: '#FF7A1A', low: 'rgba(190,198,207,0.75)', other: 'rgba(255,255,255,0.85)' };
 const VIS_MIN = 0.5;   // これ未満の点は「AIの自信が低い」として灰色で描く
+const SPEED_LABEL = { 0.25: '1/4倍速', 0.5: '1/2倍速', 1: '等倍' };
 
 // CSVに書き出す点（MediaPipe Poseの33点のうち、分析に使うもの）
 const POINTS = {
@@ -26,14 +27,15 @@ const BONES = [
   [23, 25], [25, 27], [24, 26], [26, 28],
   [27, 29], [29, 31], [27, 31], [28, 30], [30, 32], [28, 32],
 ];
-const JOINTS = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
+// 丸を描く点。31・32 はAIの「つま先」（foot_index）で、靴の先にあたる
+const JOINTS = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28, 31, 32];
 
 const state = {
   file: null, name: '', url: null,
   duration: 0, vw: 0, vh: 0, outW: 0, outH: 0,
   start: 0, end: 0, speed: 0.5, model: 'full', fps: 30,
   landmarker: null, landmarkerModel: null, delegate: '',
-  pickPoses: [], teacherIdx: null, beginnerIdx: null,
+  pickPoses: [], pickOriginal: [], teacherIdx: null, beginnerIdx: null, edited: false,
   frames: [],   // { t, A, B }  A = 最初に先生として選んだ人、B = 最初に初心者として選んだ人
   swaps: [],    // 役割を入れ替えた時刻（秒）
   videoBlob: null, csvBlob: null,
@@ -239,11 +241,20 @@ function detectAround(c, size) {
 
 // その人の形に合わせた切り出しの大きさ（ピクセル）。
 // 広すぎると隣の人が入り、見落としや取り違えが起きるので、立った人に合わせて縦長にする
-function cropSize(p) {
-  const b = bbox(p);
-  const bw = (b.x1 - b.x0) * state.vw, bh = (b.y1 - b.y0) * state.vh;
+// 自信の低い点も含めて範囲を決める。自信のある点だけで決めると、足首の自信が下がったときに
+// 足元が範囲から外れ、さらに自信が下がる悪循環になる
+function cropSize(p, last) {
+  let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+  for (let i = 0; i < 33; i++) {
+    x0 = Math.min(x0, p[i * 3]); x1 = Math.max(x1, p[i * 3]);
+    y0 = Math.min(y0, p[i * 3 + 1]); y1 = Math.max(y1, p[i * 3 + 1]);
+  }
+  const bw = (x1 - x0) * state.vw, bh = (y1 - y0) * state.vh;
   const min = Math.min(state.vw, state.vh) * 0.3;
-  return { w: Math.max(bw * 2, bh * 0.8, min), h: Math.max(bh * 1.35, bw * 1.2, min) };
+  const size = { w: Math.max(bw * 2, bh * 0.8, min), h: Math.max(bh * 1.35, bw * 1.2, min) };
+  // 人の大きさは急には縮まないので、前のコマの大きさから少しずつしか小さくしない
+  if (last) { size.w = Math.max(size.w, last.w * 0.97); size.h = Math.max(size.h, last.h * 0.97); }
+  return size;
 }
 
 const meanVis = (p) => { let s = 0; for (let i = 0; i < 33; i++) s += p[i * 3 + 2]; return s / 33; };
@@ -303,9 +314,12 @@ function nearest(poses, prev, avoid) {
 }
 
 // 1人ずつ、前のコマの位置の周りを切り出して探す
+const lastCrop = { A: null, B: null };
 async function trackFrame(prevA, prevB) {
-  const A = nearest(await detectAround(center(prevA), cropSize(prevA)), center(prevA), null);
-  const B = nearest(await detectAround(center(prevB), cropSize(prevB)), center(prevB), A ? center(A) : null);
+  lastCrop.A = cropSize(prevA, lastCrop.A);
+  lastCrop.B = cropSize(prevB, lastCrop.B);
+  const A = nearest(await detectAround(center(prevA), lastCrop.A), center(prevA), null);
+  const B = nearest(await detectAround(center(prevB), lastCrop.B), center(prevB), A ? center(A) : null);
   return { A, B };
 }
 
@@ -378,8 +392,7 @@ function drawScene(ctx, frame) {
   drawSkeleton(ctx, r.teacher, COLOR.teacher);
   personTag(ctx, r.teacher, '先生', COLOR.teacher);
   personTag(ctx, r.beginner, '初心者', COLOR.beginner);
-  const speed = state.speed === 1 ? '1倍速' : `${state.speed}倍速`;
-  tag(ctx, `${speed}　${frame.t.toFixed(1)}秒`, 0, Math.min(W, H) / 12, 'rgba(0,0,0,0.6)');
+  tag(ctx, `${SPEED_LABEL[state.speed] ?? `${state.speed}倍速`}　${frame.t.toFixed(1)}秒`, 0, Math.min(W, H) / 12, 'rgba(0,0,0,0.6)');
 }
 
 function frameAt(t) {
@@ -402,22 +415,83 @@ function pickPrompt() {
   } else if (state.beginnerIdx === null) {
     el.innerHTML = '次に<span class="b">初心者</span>をタップしてください';
   } else {
-    el.textContent = '選べました。「解析する」を押してください';
+    el.textContent = state.edited
+      ? '点を直しました。よければ「解析する」を押してください'
+      : '選べました。ずれている点は、指でドラッグして直せます。よければ「解析する」を押してください';
   }
-  $('to-analyze').disabled = state.teacherIdx === null || state.beginnerIdx === null;
+  const ready = state.teacherIdx !== null && state.beginnerIdx !== null;
+  $('to-analyze').disabled = !ready;
+  pickCanvas.classList.toggle('editing', ready);
 }
+
+// 点を直すときにつかむ点（体の関節と鼻）
+const HANDLES = [0, ...JOINTS];
 
 function drawPick() {
   const ctx = pickCanvas.getContext('2d');
-  ctx.drawImage(video, 0, 0, pickCanvas.width, pickCanvas.height);
+  const W = pickCanvas.width, H = pickCanvas.height;
+  ctx.drawImage(video, 0, 0, W, H);
+  const ready = state.teacherIdx !== null && state.beginnerIdx !== null;
   state.pickPoses.forEach((p, i) => {
+    if (ready && i !== state.teacherIdx && i !== state.beginnerIdx) return; // 選んだ2人だけ残す
     const color = i === state.teacherIdx ? COLOR.teacher : i === state.beginnerIdx ? COLOR.beginner : COLOR.other;
     drawSkeleton(ctx, p, color);
     const label = i === state.teacherIdx ? '先生' : i === state.beginnerIdx ? '初心者' : String(i + 1);
     personTag(ctx, p, label, i === state.teacherIdx ? COLOR.teacher : i === state.beginnerIdx ? COLOR.beginner : 'rgba(0,0,0,0.65)');
+    if (ready) {
+      // つかめる点を、白いふちの丸で示す
+      const r = Math.max(5, Math.min(W, H) / 70);
+      ctx.lineWidth = Math.max(1.5, r / 3);
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.fillStyle = color;
+      for (const j of HANDLES) {
+        ctx.beginPath();
+        ctx.arc(p[j * 3] * W, p[j * 3 + 1] * H, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
   });
   pickPrompt();
 }
+
+// ---------- 点を手で直す ----------
+let drag = null;
+function canvasPoint(e) {
+  const r = pickCanvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+}
+
+pickCanvas.addEventListener('pointerdown', (e) => {
+  if (state.busy || state.teacherIdx === null || state.beginnerIdx === null) return;
+  const pt = canvasPoint(e);
+  let best = null, bestD = 0.06;
+  for (const idx of [state.teacherIdx, state.beginnerIdx]) {
+    const p = state.pickPoses[idx];
+    for (const j of HANDLES) {
+      const d = dist(pt, { x: p[j * 3], y: p[j * 3 + 1] });
+      if (d < bestD) { bestD = d; best = { p, j }; }
+    }
+  }
+  if (!best) return;
+  drag = best;
+  pickCanvas.setPointerCapture(e.pointerId);
+  e.preventDefault();
+});
+
+pickCanvas.addEventListener('pointermove', (e) => {
+  if (!drag) return;
+  const pt = canvasPoint(e);
+  drag.p[drag.j * 3] = Math.max(0, Math.min(1, pt.x));
+  drag.p[drag.j * 3 + 1] = Math.max(0, Math.min(1, pt.y));
+  drag.p[drag.j * 3 + 2] = 1; // 手で直した点は「確か」とみなす
+  state.edited = true;
+  drawPick();
+});
+
+const endDrag = () => { drag = null; };
+pickCanvas.addEventListener('pointerup', endDrag);
+pickCanvas.addEventListener('pointercancel', endDrag);
 
 $('to-pick').addEventListener('click', async () => {
   try {
@@ -446,6 +520,8 @@ $('to-pick').addEventListener('click', async () => {
     el.textContent = '人を探しています…';
     await seekTo(video, state.start);
     state.pickPoses = await findPeople();
+    state.pickOriginal = state.pickPoses.map((p) => p.slice());
+    state.edited = false;
     drawPick();
   } catch (e) {
     console.error(e);
@@ -480,7 +556,10 @@ pickCanvas.addEventListener('click', async (e) => {
       const side = Math.min(state.vw, state.vh);
       const more = await detectAround(pt, { w: side * 0.6, h: side });
       for (const p of more) {
-        if (!state.pickPoses.some((q) => dist(center(q), center(p)) < 0.06)) state.pickPoses.push(p);
+        if (!state.pickPoses.some((q) => dist(center(q), center(p)) < 0.06)) {
+          state.pickPoses.push(p);
+          state.pickOriginal.push(p.slice());
+        }
       }
     } finally {
       state.busy = false;
@@ -493,8 +572,11 @@ pickCanvas.addEventListener('click', async (e) => {
   drawPick();
 });
 
+// 選び直すときは、手で直した点もAIの位置に戻す
 $('pick-reset').addEventListener('click', () => {
   state.teacherIdx = state.beginnerIdx = null;
+  state.pickPoses = state.pickOriginal.map((p) => p.slice());
+  state.edited = false;
   if (state.pickPoses.length) drawPick();
 });
 
@@ -525,6 +607,7 @@ async function analyze() {
   const bar = $('analyze-bar');
   state.frames = [];
   state.swaps = [];
+  lastCrop.A = lastCrop.B = null;
   let prevA = state.pickPoses[state.teacherIdx];
   let prevB = state.pickPoses[state.beginnerIdx];
   let lostA = 0, lostB = 0;
@@ -533,7 +616,8 @@ async function analyze() {
   for (let i = 0; i < n; i++) {
     const t = state.start + i * step;
     await seekTo(video, t);
-    const { A, B } = await trackFrame(prevA, prevB);
+    // 最初のコマは、選んだとき（手で直した場合は直した後）の点をそのまま使う
+    const { A, B } = i === 0 ? { A: prevA.slice(), B: prevB.slice() } : await trackFrame(prevA, prevB);
     if (A) prevA = A; else lostA++;
     if (B) prevB = B; else lostB++;
     state.frames.push({ t, A, B });
@@ -675,7 +759,9 @@ async function encodeVideo() {
   if (!codec) throw new Error('この端末ではMP4（H.264）を書き出せませんでした。CSVは保存できます。');
 
   const target = new ArrayBufferTarget();
-  const muxer = new Muxer({ target, video: { codec: 'avc', width: W, height: H, frameRate: outFps }, fastStart: 'in-memory' });
+  // mp4-muxer は整数のコマ数しか受け付けない。1/4倍速（毎秒7.5コマ）でも、各コマの時刻は
+  // 1/解析コマ数 秒の倍数になるので、解析のコマ数を渡せば時刻がずれない
+  const muxer = new Muxer({ target, video: { codec: 'avc', width: W, height: H, frameRate: state.fps }, fastStart: 'in-memory' });
   let failure = null;
   const encoder = new VideoEncoder({
     output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
@@ -769,6 +855,7 @@ function buildCsv() {
     '# angles_deg: knee/elbow = 3-point angle (180 = straight). arm_raise = upper arm from straight down (0 = down, 90 = shoulder height). shoulder_tilt = shoulder line from horizontal',
     '# left/right: the person\'s own left/right as detected by the AI (a mirrored video stays mirrored)',
     '# tracked_id: A = person picked as teacher at the start, B = person picked as beginner. swapped = 1 after the user swapped roles',
+    `# first_frame: ${state.edited ? 'some points were adjusted by hand (vis set to 1)' : 'AI detection as is'}`,
     `# role_swaps_at_s: ${state.swaps.length ? state.swaps.map((s) => s.toFixed(1)).join(' ') : 'none'}`,
     '# empty row values = the person was not found in that frame',
     header.join(','),
