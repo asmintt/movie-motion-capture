@@ -10,7 +10,7 @@ const MEDIAPIPE_VERSION = 'tasks-vision 0.10.14';
 const $ = (id) => document.getElementById(id);
 
 // 動画に焼き込む色（画面のテーマに関係なく固定）
-const COLOR = { teacher: '#3D7BFF', beginner: '#FF7A1A', low: 'rgba(190,198,207,0.75)', other: 'rgba(255,255,255,0.85)' };
+const COLOR = { teacher: '#3D7BFF', beginner: '#FF7A1A', mark: '#FFFFFF', low: 'rgba(150,158,167,0.8)', other: 'rgba(255,255,255,0.85)' };
 const VIS_MIN = 0.5;   // これ未満の点は「AIの自信が低い」として灰色で描く
 const SPEED_LABEL = { 0.25: '1/4倍速', 0.5: '1/2倍速', 1: '等倍' };
 
@@ -459,15 +459,7 @@ function drawSkeleton(ctx, p, color) {
     ctx.lineTo(p[j * 3] * W, p[j * 3 + 1] * H);
     ctx.stroke();
   }
-  for (const i of JOINTS) {
-    const v = p[i * 3 + 2];
-    if (v < 0.05) continue;
-    ctx.fillStyle = v >= VIS_MIN ? color : COLOR.low;
-    ctx.beginPath();
-    ctx.arc(p[i * 3] * W, p[i * 3 + 1] * H, lw * 1.25, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  // 頭：頭頂部 → 顎先 → 両肩の真ん中 の線（頭と首の傾きが分かる）と、頭頂部・鼻・顎先の丸
+  // 頭：頭頂部 → 顎先 → 両肩の真ん中 の線（頭と首の傾きが分かる）
   const hv = p[HEAD_TOP * 3 + 2], cv = p[CHIN * 3 + 2];
   const neck = { x: (p[33] + p[36]) / 2, y: (p[34] + p[37]) / 2, v: Math.min(p[35], p[38]) }; // 11・12番（両肩）の真ん中
   ctx.lineWidth = lw;
@@ -482,10 +474,12 @@ function drawSkeleton(ctx, p, color) {
   const top = { x: p[HEAD_TOP * 3], y: p[HEAD_TOP * 3 + 1] }, chin = { x: p[CHIN * 3], y: p[CHIN * 3 + 1] };
   segment(top, chin, hv, cv);
   segment(chin, neck, cv, neck.v);
-  for (const [i, r] of [[0, 1.4], [CHIN, 1.25], [HEAD_TOP, 1.25]]) {
+  // マーク（関節・頭頂部・鼻・顎先の丸）は白。自信が低い点は灰色。線の上に重ねて描く
+  const dots = [...JOINTS.map((i) => [i, 1.25]), [0, 1.4], [CHIN, 1.25], [HEAD_TOP, 1.25]];
+  for (const [i, r] of dots) {
     const v = p[i * 3 + 2];
     if (v < 0.05) continue;
-    ctx.fillStyle = v >= VIS_MIN ? color : COLOR.low;
+    ctx.fillStyle = v >= VIS_MIN ? COLOR.mark : COLOR.low;
     ctx.beginPath();
     ctx.arc(p[i * 3] * W, p[i * 3 + 1] * H, lw * r, 0, Math.PI * 2);
     ctx.fill();
