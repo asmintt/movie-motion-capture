@@ -592,10 +592,56 @@ function drawPick() {
 }
 
 // ---------- 点を手で直す ----------
-let drag = null;
+let drag = null;   // つかんでいる点 { p, j }
+let press = null;  // 長押しの判定 { x, y, timer }
+let loupeOn = false;
+const loupe = $('loupe');
+const LOUPE_SIZE = 150; // CSSの大きさと合わせる
+const LOUPE_ZOOM = 3;
+const LONG_PRESS_MS = 350;
+
 function canvasPoint(e) {
   const r = pickCanvas.getBoundingClientRect();
   return { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
+}
+
+// (clientX, clientY) のまわりを拡大して、指 (fingerX, fingerY) の少し上に表示する
+function showLoupe(clientX, clientY, fingerX, fingerY) {
+  const dpr = window.devicePixelRatio || 1;
+  const size = Math.round(LOUPE_SIZE * dpr);
+  // canvas の初期の大きさは 300×150 なので、幅と高さの両方を確かめる
+  if (loupe.width !== size || loupe.height !== size) { loupe.width = size; loupe.height = size; }
+  const r = pickCanvas.getBoundingClientRect();
+  const k = pickCanvas.width / r.width; // 画面の1px が canvas の何px か
+  const src = (LOUPE_SIZE / LOUPE_ZOOM) * k;
+  const ctx = loupe.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, size, size);
+  ctx.drawImage(pickCanvas, (clientX - r.left) * k - src / 2, (clientY - r.top) * k - src / 2, src, src, 0, 0, size, size);
+  // 指の位置を示す十字線（中心はあけて、点が見えるようにする）
+  const c = size / 2, a = 6 * dpr, b = 18 * dpr;
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+  ctx.lineWidth = 1.5 * dpr;
+  ctx.beginPath();
+  ctx.moveTo(c - b, c); ctx.lineTo(c - a, c);
+  ctx.moveTo(c + a, c); ctx.lineTo(c + b, c);
+  ctx.moveTo(c, c - b); ctx.lineTo(c, c - a);
+  ctx.moveTo(c, c + a); ctx.lineTo(c, c + b);
+  ctx.stroke();
+  const left = Math.max(4, Math.min(window.innerWidth - LOUPE_SIZE - 4, fingerX - LOUPE_SIZE / 2));
+  let top = fingerY - LOUPE_SIZE - 48;
+  if (top < 4) top = fingerY + 48; // 上に場所がなければ指の下に出す
+  loupe.style.left = `${left}px`;
+  loupe.style.top = `${top}px`;
+  loupe.hidden = false;
+}
+
+function endPress() {
+  if (press) clearTimeout(press.timer);
+  press = null;
+  drag = null;
+  loupeOn = false;
+  loupe.hidden = true;
 }
 
 pickCanvas.addEventListener('pointerdown', (e) => {
@@ -610,25 +656,46 @@ pickCanvas.addEventListener('pointerdown', (e) => {
       if (d < bestD) { bestD = d; best = { p, j }; }
     }
   }
-  if (!best) return;
-  drag = best;
-  pickCanvas.setPointerCapture(e.pointerId);
+  // 点の近くでなければ、長押しで拡大鏡だけ出す。つかんだときの指と点のずれは保ったまま動かす
+  drag = best && { ...best, dx: best.p[best.j * 3] - pt.x, dy: best.p[best.j * 3 + 1] - pt.y };
+  const x = e.clientX, y = e.clientY;
+  press = { x, y, lastX: x, lastY: y, timer: setTimeout(() => { loupeOn = true; showLoupeAtFocus(); }, LONG_PRESS_MS) };
+  try { pickCanvas.setPointerCapture(e.pointerId); } catch { /* 画面の外に出ても追い続けるためのもので、失敗しても操作はできる */ }
   e.preventDefault();
 });
 
 pickCanvas.addEventListener('pointermove', (e) => {
-  if (!drag) return;
-  const pt = canvasPoint(e);
-  drag.p[drag.j * 3] = Math.max(0, Math.min(1, pt.x));
-  drag.p[drag.j * 3 + 1] = Math.max(0, Math.min(1, pt.y));
-  drag.p[drag.j * 3 + 2] = 1; // 手で直した点は「確か」とみなす
-  state.edited = true;
-  drawPick();
+  if (!press) return;
+  press.lastX = e.clientX;
+  press.lastY = e.clientY;
+  // 長押しになる前に指が動いたら、長押しではなく普通のドラッグ
+  if (!loupeOn && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 8) clearTimeout(press.timer);
+  if (drag) {
+    const pt = canvasPoint(e);
+    drag.p[drag.j * 3] = Math.max(0, Math.min(1, pt.x + drag.dx));
+    drag.p[drag.j * 3 + 1] = Math.max(0, Math.min(1, pt.y + drag.dy));
+    drag.p[drag.j * 3 + 2] = 1; // 手で直した点は「確か」とみなす
+    state.edited = true;
+    drawPick();
+  }
+  if (loupeOn) showLoupeAtFocus();
 });
 
-const endDrag = () => { drag = null; };
-pickCanvas.addEventListener('pointerup', endDrag);
-pickCanvas.addEventListener('pointercancel', endDrag);
+// 点をつかんでいるときは点を、そうでなければ指の位置を、拡大鏡の中心にする
+function showLoupeAtFocus() {
+  if (!press) return;
+  if (drag) {
+    const r = pickCanvas.getBoundingClientRect();
+    const fx = r.left + drag.p[drag.j * 3] * r.width, fy = r.top + drag.p[drag.j * 3 + 1] * r.height;
+    showLoupe(fx, fy, press.lastX, press.lastY);
+  } else {
+    showLoupe(press.lastX, press.lastY, press.lastX, press.lastY);
+  }
+}
+
+pickCanvas.addEventListener('pointerup', endPress);
+pickCanvas.addEventListener('pointercancel', endPress);
+pickCanvas.addEventListener('contextmenu', (e) => e.preventDefault()); // 長押しで出るメニューを止める
 
 $('to-pick').addEventListener('click', async () => {
   try {
