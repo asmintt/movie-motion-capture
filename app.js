@@ -147,6 +147,11 @@ $('file').addEventListener('change', (e) => handleFile(e.target.files[0]));
 $('start-here').addEventListener('click', () => { $('start').value = preview.currentTime.toFixed(1); invalidate(); });
 $('end-here').addEventListener('click', () => { $('end').value = preview.currentTime.toFixed(1); invalidate(); });
 for (const id of ['start', 'end', 'speed', 'model', 'fps']) $(id).addEventListener('change', invalidate);
+// マークの大きさは描き方だけなので、解析はやり直さずに描き直す
+$('mark').addEventListener('change', () => {
+  if (state.pickPoses.length && $('step-pick').dataset.state === 'active') drawPick();
+  if ($('step-review').dataset.state === 'active') renderReview();
+});
 
 // 設定を変えたら、それより後のステップはやり直し
 function invalidate() {
@@ -439,7 +444,10 @@ async function trackFrame(prevA, prevB) {
 function drawSkeleton(ctx, p, color) {
   if (!p) return;
   const W = ctx.canvas.width, H = ctx.canvas.height;
-  const lw = Math.max(2, Math.round(Math.min(W, H) / 170));
+  // マークの大きさ：小は細い線、大は太い線（設定で選ぶ）
+  const lw = $('mark').value === 'large'
+    ? Math.max(3, Math.round(Math.min(W, H) / 120))
+    : Math.max(1.5, Math.min(W, H) / 300);
   ctx.lineCap = 'round';
   ctx.lineWidth = lw;
   for (const [i, j] of BONES) {
