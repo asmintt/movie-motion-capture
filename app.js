@@ -940,8 +940,8 @@ async function createWriter(analysis) {
 }
 
 // ---------- 分析つき動画（先生とのずれを赤で示す） ----------
-// 判定基準はClaudeの分析用ページ（ダンス練習分析）の v1 と同じ。基準を直したら、ここも合わせる
-const JUDGE = { version: 'v1', elbowDrop: 0.15, armRaise: 30, knee: 25, foot: 0.20, tilt: 10, minRun: 0.1 };
+// ずれとする基準。Claudeの分析用ページ（ダンス練習分析）と同じ値にしておく
+const JUDGE = { elbowDrop: 0.15, armRaise: 30, knee: 25, foot: 0.20, tilt: 10, minRun: 0.1 };
 const J_IDS = ['elbowDropL', 'elbowDropR', 'armRaiseL', 'armRaiseR', 'knee', 'foot', 'tilt'];
 const J_DIR = { elbowDropL: 'up', elbowDropR: 'up', armRaiseL: 'abs', armRaiseR: 'abs', knee: 'up', foot: 'down', tilt: 'down' };
 const J_TH = { elbowDropL: 'elbowDrop', elbowDropR: 'elbowDrop', armRaiseL: 'armRaise', armRaiseR: 'armRaise', knee: 'knee', foot: 'foot', tilt: 'tilt' };
@@ -1156,7 +1156,7 @@ function createJudge(VW, VH, L, ctx, encode) {
     c.fillRect(0, 0, VW, L.head);
     c.textBaseline = 'top';
     c.font = font(15); c.fillStyle = J_COLOR.muted;
-    c.fillText(`元の動画 ${frame.t.toFixed(1)}秒　${SPEED_LABEL[state.speed] ?? `${state.speed}倍速`}　判定基準 ${JUDGE.version}`, 14 * u, 6 * u);
+    c.fillText(`元の動画 ${frame.t.toFixed(1)}秒　${SPEED_LABEL[state.speed] ?? `${state.speed}倍速`}`, 14 * u, 6 * u);
     c.font = font(24);
     if (msgs.length) { c.fillStyle = J_COLOR.red; c.fillText('赤：先生とずれている部分 → ' + msgs.join('・'), 14 * u, 30 * u); }
     else if (frame.overlap || !frame.A || !frame.B) { c.fillStyle = J_COLOR.yellow; c.fillText('2人が重なっているか見失ったコマ（比べていません）', 14 * u, 30 * u); }
@@ -1345,7 +1345,7 @@ function buildCsv() {
     `# video_size_px: ${state.vw}x${state.vh}`,
     `# video_duration_s: ${state.duration.toFixed(2)}`,
     `# target: ${state.target} (${TARGET_LABEL[state.target]})`,
-    `# video: ${state.analysisVideo ? `analysis (deviations drawn with criteria ${JUDGE.version})` : 'skeleton only'}`,
+    `# video: ${state.analysisVideo ? 'analysis (deviations drawn in red)' : 'skeleton only'}`,
     `# analyzed_range_s: ${state.start.toFixed(1)}-${state.end.toFixed(1)}`,
     `# analysis_fps: ${state.fps} / sample_interval_s: 0.1`,
     `# model: MediaPipe Pose Landmarker ${state.model} (${MEDIAPIPE_VERSION}, ${state.delegate})`,
