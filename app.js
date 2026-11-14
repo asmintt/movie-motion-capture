@@ -4,7 +4,9 @@
 import { PoseLandmarker, FaceLandmarker } from './lib/vision_bundle.mjs';
 import { Muxer, ArrayBufferTarget } from './lib/mp4-muxer.mjs';
 
-const APP_VERSION = 'v1';
+const APP_VERSION = 'v2';
+// 分析用Artifact「ダンス練習分析」のURL。作ったらここに入れる（空のあいだはコピーだけ行う）
+const ANALYSIS_URL = '';
 const MEDIAPIPE_VERSION = 'tasks-vision 0.10.14';
 
 const $ = (id) => document.getElementById(id);
@@ -12,7 +14,8 @@ const $ = (id) => document.getElementById(id);
 // 動画に焼き込む色（画面のテーマに関係なく固定）
 const COLOR = { teacher: '#3D7BFF', beginner: '#FF7A1A', mark: '#FFFFFF', low: 'rgba(150,158,167,0.8)', other: 'rgba(255,255,255,0.85)' };
 const VIS_MIN = 0.5;   // これ未満の点は「AIの自信が低い」として灰色で描く
-const SPEED_LABEL = { 0.25: '1/4倍速', 0.5: '1/2倍速', 1: '等倍' };
+const SPEED_LABEL = { 0.25: '1/4倍速', 0.5: '1/2倍速', 1: '等倍', 2: '2倍速' };
+const TARGET_LABEL = { both: '2人', teacher: '先生のみ', beginner: '初心者のみ' };
 
 // 骨格AIの33点のあとに、頭の2点を足して持つ
 //   33 顎先：顔用AI（Face Landmarker）の顎先の点
@@ -42,12 +45,11 @@ const JOINTS = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28, 31, 32];
 const state = {
   file: null, name: '', url: null,
   duration: 0, vw: 0, vh: 0, outW: 0, outH: 0,
-  start: 0, end: 0, speed: 0.5, model: 'full', fps: 30,
+  start: 0, end: 0, speed: 0.5, model: 'full', fps: 30, target: 'both',
   landmarker: null, landmarkerModel: null, delegate: '', face: null,
   pickPoses: [], pickOriginal: [], teacherIdx: null, beginnerIdx: null, edited: false,
-  frames: [],   // { t, A, B }  A = 最初に先生として選んだ人、B = 最初に初心者として選んだ人
-  swaps: [],    // 役割を入れ替えた時刻（秒）
-  videoBlob: null, csvBlob: null,
+  frames: [],   // { t, A, B, overlap }  A = 先生として選んだ人、B = 初心者として選んだ人（対象外はnull）
+  videoBlob: null, csvBlob: null, csvText: '',
   busy: false,
 };
 window.__mmc = state; // 動作確認用
@@ -56,7 +58,12 @@ const video = $('video');     // 解析用（画面には出さない）
 const preview = $('preview'); // 設定用のプレビュー
 
 // ---------- 画面の状態 ----------
-const STEPS = ['step-file', 'step-settings', 'step-pick', 'step-analyze', 'step-review', 'step-export'];
+const STEPS = ['step-file', 'step-settings', 'step-pick', 'step-analyze', 'step-export'];
+// 解析する対象に先生・初心者が入っているか
+const needT = () => state.target !== 'beginner';
+const needB = () => state.target !== 'teacher';
+const pickReady = () => (!needT() || state.teacherIdx !== null) && (!needB() || state.beginnerIdx !== null);
+const pickedIdx = () => [needT() ? state.teacherIdx : null, needB() ? state.beginnerIdx : null].filter((i) => i !== null);
 function setStep(id, s) { $(id).dataset.state = s; }
 function lockFrom(id) {
   for (const s of STEPS.slice(STEPS.indexOf(id))) setStep(s, 'locked');
@@ -110,7 +117,6 @@ function seekTo(v, t) {
 
 async function handleFile(file) {
   if (!file) return;
-  stopReview();
   state.file = file;
   state.name = file.name || 'video';
   if (state.url) URL.revokeObjectURL(state.url);
@@ -146,18 +152,16 @@ async function handleFile(file) {
 $('file').addEventListener('change', (e) => handleFile(e.target.files[0]));
 $('start-here').addEventListener('click', () => { $('start').value = preview.currentTime.toFixed(1); invalidate(); });
 $('end-here').addEventListener('click', () => { $('end').value = preview.currentTime.toFixed(1); invalidate(); });
-for (const id of ['start', 'end', 'speed', 'model', 'fps']) $(id).addEventListener('change', invalidate);
+for (const id of ['start', 'end', 'speed', 'model', 'fps', 'target']) $(id).addEventListener('change', invalidate);
 // マークの大きさは描き方だけなので、解析はやり直さずに描き直す
 $('mark').addEventListener('change', () => {
   if (state.pickPoses.length && $('step-pick').dataset.state === 'active') drawPick();
-  if ($('step-review').dataset.state === 'active') renderReview();
 });
 
 // 設定を変えたら、それより後のステップはやり直し
 function invalidate() {
   if (state.busy) return;
   if ($('step-pick').dataset.state !== 'locked') {
-    stopReview();
     lockFrom('step-pick');
     setStep('step-settings', 'active');
   }
@@ -174,6 +178,7 @@ function readSettings() {
   state.speed = Number($('speed').value);
   state.model = $('model').value;
   state.fps = Number($('fps').value);
+  state.target = $('target').value;
 }
 
 // ---------- 骨格検出（MediaPipe Pose） ----------
@@ -432,12 +437,29 @@ function nearest(poses, prev, avoid) {
 
 // 1人ずつ、前のコマの位置の周りを切り出して探す
 const lastCrop = { A: null, B: null };
+// 対象外の人（prev が null）は探さない
 async function trackFrame(prevA, prevB) {
-  lastCrop.A = cropSize(prevA, lastCrop.A);
-  lastCrop.B = cropSize(prevB, lastCrop.B);
-  const A = nearest(await detectAround(center(prevA), lastCrop.A), center(prevA), null);
-  const B = nearest(await detectAround(center(prevB), lastCrop.B), center(prevB), A ? center(A) : null);
+  let A = null, B = null;
+  if (prevA) {
+    lastCrop.A = cropSize(prevA, lastCrop.A);
+    A = nearest(await detectAround(center(prevA), lastCrop.A), center(prevA), null);
+  }
+  if (prevB) {
+    lastCrop.B = cropSize(prevB, lastCrop.B);
+    B = nearest(await detectAround(center(prevB), lastCrop.B), center(prevB), A ? center(A) : null);
+  }
   return { A, B };
+}
+
+// 2人が重なっていて、取り違えたおそれがあるか
+function overlapping(A, B) {
+  if (!A || !B) return false;
+  if (dist(center(A), center(B)) < 0.08) return true;
+  const a = bbox(A), b = bbox(B);
+  const iw = Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0));
+  const ih = Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0));
+  const small = Math.min((a.x1 - a.x0) * (a.y1 - a.y0), (b.x1 - b.x0) * (b.y1 - b.y0));
+  return small > 0 && (iw * ih) / small > 0.35;
 }
 
 // ---------- 描画 ----------
@@ -513,8 +535,7 @@ function personTag(ctx, p, text, color) {
 }
 
 function rolesOf(frame) {
-  const flips = state.swaps.filter((s) => s <= frame.t + 1e-6).length;
-  return flips % 2 ? { teacher: frame.B, beginner: frame.A, swapped: true } : { teacher: frame.A, beginner: frame.B, swapped: false };
+  return { teacher: frame.A, beginner: frame.B };
 }
 
 function drawScene(ctx, frame) {
@@ -541,19 +562,20 @@ const pickCanvas = $('pick-canvas');
 function pickPrompt() {
   const el = $('pick-prompt');
   el.classList.remove('error');
-  if (state.pickPoses.length < 2 && state.beginnerIdx === null) {
-    const who = state.teacherIdx === null ? '<span class="t">先生</span>' : '<span class="b">初心者</span>';
-    el.innerHTML = `${state.pickPoses.length}人しか見つかっていません。${who}をタップすると、その周りを探し直します。見つからないときは開始の位置を変えてください。`;
-  } else if (state.teacherIdx === null) {
-    el.innerHTML = '<span class="t">先生</span>をタップしてください';
-  } else if (state.beginnerIdx === null) {
-    el.innerHTML = '次に<span class="b">初心者</span>をタップしてください';
+  const T = '<span class="t">先生</span>', B = '<span class="b">初心者</span>';
+  const next = needT() && state.teacherIdx === null ? T : B;
+  const want = state.target === 'both' ? 2 : 1;
+  if (!pickReady() && state.pickPoses.length - pickedIdx().length < 1) {
+    el.innerHTML = `${state.pickPoses.length}人しか見つかっていません。${next}をタップすると、その周りを探し直します。見つからないときは開始の位置を変えてください。`;
+  } else if (!pickReady()) {
+    const extra = want === 1 && state.pickPoses.length > 1 ? '（ほかの人は追いません）' : '';
+    el.innerHTML = (state.target === 'both' && next === B ? '次に' : '') + `${next}をタップしてください${extra}`;
   } else {
     el.textContent = state.edited
       ? '点を直しました。よければ「解析する」を押してください'
       : '選べました。ずれている点は、指でドラッグして直せます。よければ「解析する」を押してください';
   }
-  const ready = state.teacherIdx !== null && state.beginnerIdx !== null;
+  const ready = pickReady();
   $('to-analyze').disabled = !ready;
   pickCanvas.classList.toggle('editing', ready);
 }
@@ -565,9 +587,9 @@ function drawPick() {
   const ctx = pickCanvas.getContext('2d');
   const W = pickCanvas.width, H = pickCanvas.height;
   ctx.drawImage(video, 0, 0, W, H);
-  const ready = state.teacherIdx !== null && state.beginnerIdx !== null;
+  const ready = pickReady();
   state.pickPoses.forEach((p, i) => {
-    if (ready && i !== state.teacherIdx && i !== state.beginnerIdx) return; // 選んだ2人だけ残す
+    if (ready && !pickedIdx().includes(i)) return; // 選んだ人だけ残す
     const color = i === state.teacherIdx ? COLOR.teacher : i === state.beginnerIdx ? COLOR.beginner : COLOR.other;
     drawSkeleton(ctx, p, color);
     const label = i === state.teacherIdx ? '先生' : i === state.beginnerIdx ? '初心者' : String(i + 1);
@@ -645,10 +667,10 @@ function endPress() {
 }
 
 pickCanvas.addEventListener('pointerdown', (e) => {
-  if (state.busy || state.teacherIdx === null || state.beginnerIdx === null) return;
+  if (state.busy || !pickReady()) return;
   const pt = canvasPoint(e);
   let best = null, bestD = 0.06;
-  for (const idx of [state.teacherIdx, state.beginnerIdx]) {
+  for (const idx of pickedIdx()) {
     const p = state.pickPoses[idx];
     for (const j of HANDLES) {
       if (p[j * 3 + 2] < 0.05) continue;
@@ -706,7 +728,6 @@ $('to-pick').addEventListener('click', async () => {
   }
   // iPhoneでは、ボタンを押した直後に一度再生しておくとコマの移動が安定する
   video.play().then(() => video.pause()).catch(() => {});
-  stopReview();
   lockFrom('step-pick');
   setStep('step-settings', 'done');
   setStep('step-pick', 'active');
@@ -740,7 +761,7 @@ $('to-pick').addEventListener('click', async () => {
 function poseAt(pt) {
   let best = -1, bestD = Infinity;
   state.pickPoses.forEach((p, i) => {
-    if (i === state.teacherIdx) return;
+    if (pickedIdx().includes(i)) return;
     const b = bbox(p);
     const inside = pt.x >= b.x0 && pt.x <= b.x1 && pt.y >= b.y0 && pt.y <= b.y1;
     const d = inside ? 0 : dist(pt, center(p));
@@ -750,7 +771,7 @@ function poseAt(pt) {
 }
 
 pickCanvas.addEventListener('click', async (e) => {
-  if (state.busy || state.beginnerIdx !== null || !state.landmarker) return;
+  if (state.busy || pickReady() || !state.landmarker) return;
   const r = pickCanvas.getBoundingClientRect();
   const pt = { x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height };
   let best = poseAt(pt);
@@ -772,13 +793,13 @@ pickCanvas.addEventListener('click', async (e) => {
     best = poseAt(pt);
     if (best < 0) { drawPick(); return; }
   }
-  if (state.teacherIdx === null) state.teacherIdx = best;
+  if (needT() && state.teacherIdx === null) state.teacherIdx = best;
   else state.beginnerIdx = best;
-  if (state.beginnerIdx !== null) {
-    // 2人が決まったら、顎先・頭頂部を探して、直せる点に加える
+  if (pickReady()) {
+    // 人が決まったら、顎先・頭頂部を探して、直せる点に加える
     state.busy = true;
     try {
-      for (const i of [state.teacherIdx, state.beginnerIdx]) {
+      for (const i of pickedIdx()) {
         await addHead(state.pickPoses[i]);
         state.pickOriginal[i] = state.pickPoses[i].slice();
       }
@@ -797,17 +818,19 @@ $('pick-reset').addEventListener('click', () => {
   if (state.pickPoses.length) drawPick();
 });
 
-// ---------- 4. 解析 ----------
+// ---------- 4. 解析（骨格の検出と、動画・CSVの書き出しを1回で行う） ----------
 $('to-analyze').addEventListener('click', async () => {
   setStep('step-pick', 'done');
   setStep('step-analyze', 'active');
-  lockFrom('step-review');
+  lockFrom('step-export');
+  $('save-video').disabled = $('save-csv').disabled = $('to-claude').disabled = true;
+  $('result-wrap').hidden = true;
   state.busy = true;
   await keepAwake(true);
   try {
-    await analyze();
+    const noVideo = await analyze();
     setStep('step-analyze', 'done');
-    await setupReview();
+    showResult(noVideo);
   } catch (e) {
     console.error(e);
     message('analyze-info', `解析が止まりました（${e.message}）。もう一度「解析する」を押してください。`, true);
@@ -815,148 +838,6 @@ $('to-analyze').addEventListener('click', async () => {
   } finally {
     state.busy = false;
     keepAwake(false);
-  }
-});
-
-async function analyze() {
-  const step = 1 / state.fps;
-  const n = Math.floor((state.end - state.start) / step + 1e-6) + 1;
-  const bar = $('analyze-bar');
-  state.frames = [];
-  state.swaps = [];
-  lastCrop.A = lastCrop.B = null;
-  let prevA = state.pickPoses[state.teacherIdx];
-  let prevB = state.pickPoses[state.beginnerIdx];
-  let lostA = 0, lostB = 0;
-  const t0 = performance.now();
-  message('analyze-info', '終わるまでこの画面を開いたままにしてください。');
-  for (let i = 0; i < n; i++) {
-    const t = state.start + i * step;
-    await seekTo(video, t);
-    // 最初のコマは、選んだとき（手で直した場合は直した後）の点をそのまま使う
-    const { A, B } = i === 0 ? { A: prevA.slice(), B: prevB.slice() } : await trackFrame(prevA, prevB);
-    if (i > 0) {
-      if (A) await addHead(A);
-      if (B) await addHead(B);
-    }
-    if (A) prevA = A; else lostA++;
-    if (B) prevB = B; else lostB++;
-    state.frames.push({ t, A, B });
-    if (i % 3 === 0 || i === n - 1) {
-      bar.style.width = `${((i + 1) / n) * 100}%`;
-      const left = ((performance.now() - t0) / (i + 1)) * (n - i - 1) / 1000;
-      message('analyze-info', `${i + 1} / ${n} コマ　あと約${Math.ceil(left)}秒（この画面を開いたままにしてください）`);
-      await nextPaint();
-    }
-  }
-  state.headCalibrated = { A: calibrateHeads('A'), B: calibrateHeads('B') };
-  const sec = ((performance.now() - t0) / 1000).toFixed(0);
-  const lost = (lostA + lostB) ? `　見失ったコマ：先生 ${lostA}・初心者 ${lostB}` : '';
-  message('analyze-info', `解析が終わりました（${n}コマ・${sec}秒・${state.delegate}）。${lost}`);
-}
-
-// ---------- 5. 確認 ----------
-const reviewCanvas = $('review-canvas');
-let playing = false;
-
-async function setupReview() {
-  reviewCanvas.width = state.outW;
-  reviewCanvas.height = state.outH;
-  setStep('step-review', 'active');
-  updateSwapInfo();
-  await showAt(state.start);
-}
-
-async function showAt(t) {
-  await seekTo(video, t);
-  renderReview();
-}
-
-function renderReview() {
-  const t = video.currentTime;
-  drawScene(reviewCanvas.getContext('2d'), frameAt(t));
-  $('review-time').textContent = `${t.toFixed(1)}秒`;
-  $('seek').value = String(Math.round(((t - state.start) / (state.end - state.start)) * 1000));
-}
-
-function loop() {
-  if (!playing) return;
-  if (video.currentTime >= state.end - 0.01 || video.ended) {
-    stopReview();
-    showAt(state.start);
-    return;
-  }
-  renderReview();
-  requestAnimationFrame(loop);
-}
-
-function stopReview() {
-  if (!playing) return;
-  playing = false;
-  video.pause();
-  $('play').textContent = '再生';
-}
-
-$('play').addEventListener('click', async () => {
-  if (playing) { stopReview(); return; }
-  if (video.currentTime >= state.end - 0.05 || video.currentTime < state.start) await seekTo(video, state.start);
-  video.playbackRate = state.speed;
-  try { await video.play(); } catch { return; }
-  playing = true;
-  $('play').textContent = '止める';
-  requestAnimationFrame(loop);
-});
-
-$('seek').addEventListener('input', async (e) => {
-  stopReview();
-  const t = state.start + (state.end - state.start) * (Number(e.target.value) / 1000);
-  await showAt(t);
-});
-
-$('swap').addEventListener('click', () => {
-  stopReview();
-  const f = frameAt(video.currentTime);
-  if (!f) return;
-  const t = Number(f.t.toFixed(3));
-  const at = state.swaps.findIndex((s) => Math.abs(s - t) < 1e-3);
-  if (at >= 0) state.swaps.splice(at, 1); else state.swaps.push(t);
-  state.swaps.sort((x, y) => x - y);
-  updateSwapInfo();
-  renderReview();
-});
-
-function updateSwapInfo() {
-  const el = $('swap-info');
-  el.textContent = state.swaps.length
-    ? `入れ替え：${state.swaps.map((s) => `${s.toFixed(1)}秒`).join('、')} から（同じ位置でもう一度押すと取り消し）`
-    : '';
-}
-
-// ---------- 6. 書き出し ----------
-$('to-export').addEventListener('click', async () => {
-  stopReview();
-  setStep('step-review', 'done');
-  setStep('step-export', 'active');
-  $('save-video').disabled = $('save-csv').disabled = true;
-  $('result-wrap').hidden = true;
-  state.busy = true;
-  await keepAwake(true);
-  try {
-    state.csvBlob = new Blob(['﻿' + buildCsv()], { type: 'text/csv' });
-    $('save-csv').disabled = false;
-    state.videoBlob = await encodeVideo();
-    const url = URL.createObjectURL(state.videoBlob);
-    $('result').src = url;
-    $('result-wrap').hidden = false;
-    $('save-video').disabled = false;
-    message('export-info', `できました（動画 ${(state.videoBlob.size / 1e6).toFixed(1)}MB）。下のボタンで保存します。`);
-  } catch (e) {
-    console.error(e);
-    message('export-info', e.message, true);
-  } finally {
-    state.busy = false;
-    keepAwake(false);
-    setStep('step-review', 'active');
   }
 });
 
@@ -970,20 +851,20 @@ async function pickCodec(config) {
   return null;
 }
 
-async function encodeVideo() {
-  if (!('VideoEncoder' in window)) {
-    throw new Error('このブラウザは動画の書き出しに対応していません。iPhoneはiOS 16.4以降のSafariで開いてください。CSVは保存できます。');
-  }
+// 動画の書き出しの準備。書き出せない端末では null（CSVだけ作る）
+async function createWriter() {
+  if (!('VideoEncoder' in window)) return null;
   const W = state.outW, H = state.outH;
-  const outFps = state.fps * state.speed; // 0.5倍速では1コマを2倍の長さで見せる
+  const outFps = state.fps * state.speed; // 1/2倍速では1コマを2倍の長さで、2倍速では半分の長さで見せる
   const base = { width: W, height: H, bitrate: Math.max(1_500_000, Math.round(W * H * outFps * 0.25)), framerate: outFps };
   const codec = await pickCodec(base);
-  if (!codec) throw new Error('この端末ではMP4（H.264）を書き出せませんでした。CSVは保存できます。');
+  if (!codec) return null;
 
   const target = new ArrayBufferTarget();
-  // mp4-muxer は整数のコマ数しか受け付けない。1/4倍速（毎秒7.5コマ）でも、各コマの時刻は
-  // 1/解析コマ数 秒の倍数になるので、解析のコマ数を渡せば時刻がずれない
-  const muxer = new Muxer({ target, video: { codec: 'avc', width: W, height: H, frameRate: state.fps }, fastStart: 'in-memory' });
+  // mp4-muxer は整数のコマ数しか受け付けない。各コマの時刻は「1/解析コマ数」秒か「1/書き出しコマ数」秒の
+  // 倍数になるので、整数ならそちらを、そうでなければ解析のコマ数を渡す
+  const frameRate = Number.isInteger(outFps) ? outFps : state.fps;
+  const muxer = new Muxer({ target, video: { codec: 'avc', width: W, height: H, frameRate }, fastStart: 'in-memory' });
   let failure = null;
   const encoder = new VideoEncoder({
     output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
@@ -995,30 +876,110 @@ async function encodeVideo() {
   canvas.width = W;
   canvas.height = H;
   const ctx = canvas.getContext('2d');
-  const bar = $('export-bar');
-  const n = state.frames.length;
   const dur = 1e6 / outFps;
+  const keyEvery = Math.max(1, Math.round(outFps * 2));
+  return {
+    async add(frame, i) {
+      if (failure) throw failure;
+      drawScene(ctx, frame);
+      const vf = new VideoFrame(canvas, { timestamp: Math.round(i * dur), duration: Math.round(dur) });
+      encoder.encode(vf, { keyFrame: i % keyEvery === 0 });
+      vf.close();
+      while (encoder.encodeQueueSize > 6) await sleep(4);
+    },
+    async finish() {
+      await encoder.flush();
+      if (failure) throw failure;
+      encoder.close();
+      muxer.finalize();
+      return new Blob([target.buffer], { type: 'video/mp4' });
+    },
+  };
+}
+
+async function analyze() {
+  const step = 1 / state.fps;
+  const n = Math.floor((state.end - state.start) / step + 1e-6) + 1;
+  const bar = $('analyze-bar');
+  bar.style.width = '0%';
+  state.frames = [];
+  state.videoBlob = state.csvBlob = null;
+  lastCrop.A = lastCrop.B = null;
+  let prevA = needT() ? state.pickPoses[state.teacherIdx] : null;
+  let prevB = needB() ? state.pickPoses[state.beginnerIdx] : null;
+  let lostA = 0, lostB = 0, overlaps = 0;
+  const writer = await createWriter();
+  const t0 = performance.now();
+  message('analyze-info', '終わるまでこの画面を開いたままにしてください。');
   for (let i = 0; i < n; i++) {
-    if (failure) throw failure;
-    const f = state.frames[i];
-    await seekTo(video, f.t);
-    drawScene(ctx, f);
-    const vf = new VideoFrame(canvas, { timestamp: Math.round(i * dur), duration: Math.round(dur) });
-    encoder.encode(vf, { keyFrame: i % Math.max(1, Math.round(outFps * 2)) === 0 });
-    vf.close();
-    while (encoder.encodeQueueSize > 6) await sleep(4);
+    const t = state.start + i * step;
+    await seekTo(video, t);
+    // 最初のコマは、選んだとき（手で直した場合は直した後）の点をそのまま使う
+    const { A, B } = i === 0 ? { A: prevA && prevA.slice(), B: prevB && prevB.slice() } : await trackFrame(prevA, prevB);
+    if (i > 0) {
+      if (A) await addHead(A);
+      if (B) await addHead(B);
+    }
+    if (prevA) { if (A) prevA = A; else lostA++; }
+    if (prevB) { if (B) prevB = B; else lostB++; }
+    const frame = { t, A, B, overlap: overlapping(A, B) };
+    if (frame.overlap) overlaps++;
+    state.frames.push(frame);
+    // 同じコマを、そのまま動画に書き込む
+    if (writer) await writer.add(frame, i);
     if (i % 3 === 0 || i === n - 1) {
       bar.style.width = `${((i + 1) / n) * 100}%`;
-      message('export-info', `動画を作っています　${i + 1} / ${n} コマ`);
+      const left = ((performance.now() - t0) / (i + 1)) * (n - i - 1) / 1000;
+      message('analyze-info', `${i + 1} / ${n} コマ　あと約${Math.ceil(left)}秒（この画面を開いたままにしてください）`);
       await nextPaint();
     }
   }
-  await encoder.flush();
-  if (failure) throw failure;
-  encoder.close();
-  muxer.finalize();
-  return new Blob([target.buffer], { type: 'video/mp4' });
+  message('analyze-info', '仕上げています…');
+  state.headCalibrated = { A: calibrateHeads('A'), B: calibrateHeads('B') };
+  state.csvText = buildCsv();
+  state.csvBlob = new Blob(['﻿' + state.csvText], { type: 'text/csv' });
+  if (writer) state.videoBlob = await writer.finish();
+  const sec = ((performance.now() - t0) / 1000).toFixed(0);
+  const lost = [needT() && lostA ? `先生 ${lostA}` : '', needB() && lostB ? `初心者 ${lostB}` : ''].filter(Boolean).join('・');
+  message('analyze-info', `解析が終わりました（${n}コマ・${sec}秒・${state.delegate}）。`
+    + (lost ? `　見失ったコマ：${lost}` : '')
+    + (overlaps ? `　2人が重なったコマ：${overlaps}（CSVに印を付けました）` : ''));
+  return !writer;
 }
+
+// ---------- 5. 保存・6. Claudeで分析 ----------
+function showResult(noVideo) {
+  setStep('step-export', 'active');
+  $('save-csv').disabled = false;
+  $('to-claude').disabled = false;
+  if (state.videoBlob) {
+    $('result').src = URL.createObjectURL(state.videoBlob);
+    $('result-wrap').hidden = false;
+    $('save-video').disabled = false;
+    message('export-info', `できました（動画 ${(state.videoBlob.size / 1e6).toFixed(1)}MB）。手元に残したいときは保存してください。`);
+  } else {
+    message('export-info', noVideo
+      ? 'この端末では動画を書き出せませんでした（iPhoneはiOS 16.4以降のSafariが必要です）。CSVは保存できます。'
+      : '動画を書き出せませんでした。CSVは保存できます。', true);
+  }
+  message('claude-info', ANALYSIS_URL
+    ? '骨格データをコピーして、分析用のページ（Artifact）を開きます。開いたら貼り付けて「分析する」を押してください。'
+    : '分析用のページ（Artifact）のリンクがまだ入っていないので、今は骨格データのコピーだけ行います。');
+  $('step-export').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+$('to-claude').addEventListener('click', async () => {
+  if (!state.csvText) return;
+  // コピーとページを開く操作は、押した直後に続けて行う（iPhoneで止められないように）
+  const copy = navigator.clipboard ? navigator.clipboard.writeText(state.csvText) : Promise.reject(new Error('no clipboard'));
+  if (ANALYSIS_URL) window.open(ANALYSIS_URL, '_blank');
+  try {
+    await copy;
+    message('claude-info', ANALYSIS_URL ? '骨格データをコピーしました。開いたページに貼り付けてください。' : '骨格データをコピーしました。');
+  } catch {
+    message('claude-info', 'コピーできませんでした。「CSVを保存」で保存してから渡してください。', true);
+  }
+});
 
 // ---------- CSV ----------
 function angle3(a, b, c) {
@@ -1059,7 +1020,7 @@ function csvCell(v) {
 function buildCsv() {
   const names = Object.keys(POINTS);
   const header = [
-    'time_s', 'role', 'tracked_id', 'swapped',
+    'time_s', 'role', 'tracked_id', 'overlap',
     ...names.flatMap((n) => [`${n}_x`, `${n}_y`, `${n}_vis`]),
     'torso_px', 'knee_angle_left', 'knee_angle_right', 'elbow_angle_left', 'elbow_angle_right',
     'arm_raise_left', 'arm_raise_right', 'shoulder_tilt',
@@ -1070,6 +1031,7 @@ function buildCsv() {
     `# created: ${new Date().toISOString()}`,
     `# video_size_px: ${state.vw}x${state.vh}`,
     `# video_duration_s: ${state.duration.toFixed(2)}`,
+    `# target: ${state.target} (${TARGET_LABEL[state.target]})`,
     `# analyzed_range_s: ${state.start.toFixed(1)}-${state.end.toFixed(1)}`,
     `# analysis_fps: ${state.fps} / sample_interval_s: 0.1`,
     `# model: MediaPipe Pose Landmarker ${state.model} (${MEDIAPIPE_VERSION}, ${state.delegate})`,
@@ -1079,9 +1041,9 @@ function buildCsv() {
     '# head points when the face AI could not find the face: chin and head_top are ESTIMATED from pose eyes and mouth (vis = 0.4), using the face proportions measured on the same person\'s face-found frames (median), or adult averages if fewer than 5 such frames. vis 0 = no estimate (x/y empty)',
     `# head_estimate_calibrated_from_frames: tracked A ${state.headCalibrated?.A ?? 0}, tracked B ${state.headCalibrated?.B ?? 0}`,
     '# left/right: the person\'s own left/right as detected by the AI (a mirrored video stays mirrored)',
-    '# tracked_id: A = person picked as teacher at the start, B = person picked as beginner. swapped = 1 after the user swapped roles',
+    '# tracked_id: A = person picked as teacher, B = person picked as beginner. Only the roles in target are written',
+    '# overlap: 1 = the two people overlapped in this frame, so the roles may be mixed up or points may be wrong (consider excluding)',
     `# first_frame: ${state.edited ? 'some points were adjusted by hand (vis set to 1)' : 'AI detection as is'}`,
-    `# role_swaps_at_s: ${state.swaps.length ? state.swaps.map((s) => s.toFixed(1)).join(' ') : 'none'}`,
     '# empty row values = the person was not found in that frame',
     header.join(','),
   ];
@@ -1091,9 +1053,10 @@ function buildCsv() {
     const f = frameAt(t);
     const r = rolesOf(f);
     for (const role of ['teacher', 'beginner']) {
+      if (role === 'teacher' ? !needT() : !needB()) continue;
       const p = r[role];
-      const id = (role === 'teacher') !== r.swapped ? 'A' : 'B';
-      const row = [t.toFixed(1), role, id, r.swapped ? 1 : 0];
+      const id = role === 'teacher' ? 'A' : 'B';
+      const row = [t.toFixed(1), role, id, f.overlap ? 1 : 0];
       if (p) {
         for (const n of names) {
           const q = px(p, POINTS[n]);

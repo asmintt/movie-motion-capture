@@ -17,7 +17,7 @@
 <main>
   <header class="top">
     <h1>ムービー・モーションキャプチャ</h1>
-    <p class="sub">先生と初心者が映った練習動画から、骨格つき動画（MP4）と骨格データ（CSV）を作ります。動画はこのiPhoneの中だけで処理されます。</p>
+    <p class="sub">先生と初心者（2人、またはどちらか1人）が映った練習動画から、骨格つき動画（MP4）と骨格データ（CSV）を作ります。動画はこのiPhoneの中だけで処理されます。</p>
   </header>
 
   <!-- 1. 動画を選ぶ -->
@@ -47,6 +47,14 @@
     <div class="preview-wrap"><video id="preview" playsinline muted controls preload="metadata"></video></div>
     <div class="grid">
       <label class="field">
+        <span>解析する対象</span>
+        <select id="target">
+          <option value="both" selected>2人（先生と初心者）</option>
+          <option value="teacher">先生のみ</option>
+          <option value="beginner">初心者のみ</option>
+        </select>
+      </label>
+      <label class="field">
         <span>解析の開始（秒）</span>
         <span class="row">
           <input type="number" id="start" min="0" step="0.1" value="0" inputmode="decimal">
@@ -66,6 +74,7 @@
           <option value="0.25">1/4倍速</option>
           <option value="0.5" selected>1/2倍速（おすすめ）</option>
           <option value="1">等倍</option>
+          <option value="2">2倍速</option>
         </select>
       </label>
       <label class="field">
@@ -90,7 +99,7 @@
         </select>
       </label>
     </div>
-    <p class="hint">開始の位置で、次に先生と初心者を選びます。2人がはっきり映っているところを開始にしてください。</p>
+    <p class="hint">開始の位置で、次に解析する人を選びます。対象の人がはっきり映っているところを開始にしてください。</p>
     <button type="button" class="btn primary" id="to-pick">この設定で人を選ぶ</button>
   </section>
 
@@ -110,36 +119,24 @@
   <!-- 4. 解析 -->
   <section class="step" id="step-analyze" data-state="locked">
     <h2><span class="num">4</span>解析する</h2>
+    <p class="hint">骨格の検出と、骨格つき動画・CSVの作成を1回で行います。</p>
     <div class="progress"><i id="analyze-bar"></i></div>
     <p class="hint" id="analyze-info">終わるまでこの画面を開いたままにしてください。</p>
   </section>
 
-  <!-- 5. 確認 -->
-  <section class="step" id="step-review" data-state="locked">
-    <h2><span class="num">5</span>取り違えを確かめる</h2>
-    <p class="hint">再生して、青（先生）とオレンジ（初心者）が入れ替わっていないか確かめます。入れ替わっていたら、そのコマで止めて「入れ替える」を押します。</p>
-    <div class="canvas-wrap"><canvas id="review-canvas"></canvas></div>
-    <input type="range" id="seek" min="0" max="1000" value="0" step="1" aria-label="再生位置">
-    <div class="actions">
-      <button type="button" class="btn" id="play">再生</button>
-      <span class="time" id="review-time">0.0秒</span>
-      <button type="button" class="btn" id="swap">ここから入れ替える</button>
-    </div>
-    <p class="hint" id="swap-info"></p>
-    <button type="button" class="btn primary" id="to-export">動画とCSVを作る</button>
-  </section>
-
-  <!-- 6. 保存 -->
+  <!-- 5. 保存・6. 分析 -->
   <section class="step" id="step-export" data-state="locked">
-    <h2><span class="num">6</span>保存する</h2>
-    <div class="progress"><i id="export-bar"></i></div>
+    <h2><span class="num">5</span>保存する</h2>
     <p class="hint" id="export-info"></p>
     <div class="preview-wrap" id="result-wrap" hidden><video id="result" playsinline controls loop></video></div>
     <div class="actions">
-      <button type="button" class="btn primary" id="save-video" disabled>動画を保存</button>
-      <button type="button" class="btn primary" id="save-csv" disabled>CSVを保存</button>
+      <button type="button" class="btn" id="save-video" disabled>動画を保存</button>
+      <button type="button" class="btn" id="save-csv" disabled>CSVを保存</button>
     </div>
-    <p class="hint">保存したCSVは、Claudeのプロジェクト「ダンス練習分析」に添えて「今日のレッスンを分析して」と頼みます。</p>
+    <p class="hint">手元に残したいときだけ保存します。動画は写真アプリへ、CSVは「ファイル」アプリへ。</p>
+    <h2 class="sub-step"><span class="num">6</span>Claudeで分析する</h2>
+    <button type="button" class="btn primary" id="to-claude" disabled>Claudeで分析</button>
+    <p class="hint" id="claude-info"></p>
   </section>
 
   <footer class="foot">

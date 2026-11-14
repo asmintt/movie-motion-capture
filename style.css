@@ -68,6 +68,7 @@ p { margin: 0; }
 .step[data-state="locked"] { opacity: .45; pointer-events: none; }
 .step[data-state="locked"] > :not(h2) { display: none; }
 .step[data-state="done"] h2 .num { background: var(--muted); }
+h2.sub-step { margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--line); }
 .num {
   width: 28px; height: 28px; border-radius: 50%;
   background: var(--accent); color: var(--accent-ink);
