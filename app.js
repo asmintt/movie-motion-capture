@@ -6,13 +6,13 @@ import { Muxer, ArrayBufferTarget } from './lib/mp4-muxer.mjs';
 
 const APP_VERSION = 'v2';
 // 分析用Artifact「ダンス練習分析」のURL。作ったらここに入れる（空のあいだはコピーだけ行う）
-const ANALYSIS_URL = '';
+const ANALYSIS_URL = 'https://claude.ai/artifact/M5aJy3Tk7ZBjCZ2r7NHmX9';
 const MEDIAPIPE_VERSION = 'tasks-vision 0.10.14';
 
 const $ = (id) => document.getElementById(id);
 
 // 動画に焼き込む色（画面のテーマに関係なく固定）
-const COLOR = { teacher: '#3D7BFF', beginner: '#FF7A1A', mark: '#FFFFFF', low: 'rgba(150,158,167,0.8)', other: 'rgba(255,255,255,0.85)' };
+const COLOR = { teacher: '#3D7BFF', beginner: '#FF7A1A', hip: '#FFA21F', mark: '#FFFFFF', low: 'rgba(150,158,167,0.8)', other: 'rgba(255,255,255,0.85)' };
 const VIS_MIN = 0.5;   // これ未満の点は「AIの自信が低い」として灰色で描く
 const SPEED_LABEL = { 0.25: '1/4倍速', 0.5: '1/2倍速', 1: '等倍', 2: '2倍速' };
 const TARGET_LABEL = { both: '2人', teacher: '先生のみ', beginner: '初心者のみ' };
@@ -153,6 +153,14 @@ $('file').addEventListener('change', (e) => handleFile(e.target.files[0]));
 $('start-here').addEventListener('click', () => { $('start').value = preview.currentTime.toFixed(1); invalidate(); });
 $('end-here').addEventListener('click', () => { $('end').value = preview.currentTime.toFixed(1); invalidate(); });
 for (const id of ['start', 'end', 'speed', 'model', 'fps', 'target']) $(id).addEventListener('change', invalidate);
+// 分析つき動画は2人のときだけ選べる
+function syncVideoKind() {
+  const both = $('target').value === 'both';
+  $('video-kind').querySelector('option[value="analysis"]').disabled = !both;
+  if (!both) $('video-kind').value = 'skeleton';
+}
+$('target').addEventListener('change', syncVideoKind);
+syncVideoKind();
 // マークの大きさは描き方だけなので、解析はやり直さずに描き直す
 $('mark').addEventListener('change', () => {
   if (state.pickPoses.length && $('step-pick').dataset.state === 'active') drawPick();
@@ -496,10 +504,35 @@ function drawSkeleton(ctx, p, color) {
   const top = { x: p[HEAD_TOP * 3], y: p[HEAD_TOP * 3 + 1] }, chin = { x: p[CHIN * 3], y: p[CHIN * 3 + 1] };
   segment(top, chin, hv, cv);
   segment(chin, neck, cv, neck.v);
+  // 頭頂部からまっすぐ下ろした点線（体の軸がどちらへ傾いているかの目安）。足元の高さまで引く
+  if (hv >= 0.05) {
+    let foot = 0;
+    for (const i of [27, 28, 29, 30, 31, 32]) if (p[i * 3 + 2] >= 0.05) foot = Math.max(foot, p[i * 3 + 1]);
+    if (foot > top.y) {
+      ctx.save();
+      ctx.setLineDash([lw * 3, lw * 2.5]);
+      ctx.lineWidth = Math.max(1, lw * 0.8);
+      ctx.strokeStyle = hv >= VIS_MIN ? color : COLOR.low;
+      ctx.beginPath();
+      ctx.moveTo(top.x * W, top.y * H);
+      ctx.lineTo(top.x * W, foot * H);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
   // マーク（関節・頭頂部・鼻・顎先の丸）は線と同じ色で、白いふちを付ける。自信が低い点は灰色。線の上に重ねて描く
   const dots = [...JOINTS.map((i) => [i, 1.25]), [0, 1.4], [CHIN, 1.25], [HEAD_TOP, 1.25]];
   ctx.strokeStyle = COLOR.mark;
   ctx.lineWidth = Math.max(1, lw * 0.5);
+  // 腰の中心（左右の腰の真ん中）：オレンジの丸
+  const hipV = Math.min(p[23 * 3 + 2], p[24 * 3 + 2]);
+  if (hipV >= 0.05) {
+    ctx.fillStyle = hipV >= VIS_MIN ? COLOR.hip : COLOR.low;
+    ctx.beginPath();
+    ctx.arc(((p[69] + p[72]) / 2) * W, ((p[70] + p[73]) / 2) * H, lw * 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
   for (const [i, r] of dots) {
     const v = p[i * 3 + 2];
     if (v < 0.05) continue;
@@ -538,7 +571,7 @@ function rolesOf(frame) {
   return { teacher: frame.A, beginner: frame.B };
 }
 
-function drawScene(ctx, frame) {
+function drawScene(ctx, frame, caption = true) {
   const W = ctx.canvas.width, H = ctx.canvas.height;
   ctx.drawImage(video, 0, 0, W, H);
   if (!frame) return;
@@ -547,7 +580,7 @@ function drawScene(ctx, frame) {
   drawSkeleton(ctx, r.teacher, COLOR.teacher);
   personTag(ctx, r.teacher, '先生', COLOR.teacher);
   personTag(ctx, r.beginner, '初心者', COLOR.beginner);
-  tag(ctx, `${SPEED_LABEL[state.speed] ?? `${state.speed}倍速`}　${frame.t.toFixed(1)}秒`, 0, Math.min(W, H) / 12, 'rgba(0,0,0,0.6)');
+  if (caption) tag(ctx, `${SPEED_LABEL[state.speed] ?? `${state.speed}倍速`}　${frame.t.toFixed(1)}秒`, 0, Math.min(W, H) / 12, 'rgba(0,0,0,0.6)');
 }
 
 function frameAt(t) {
@@ -852,9 +885,12 @@ async function pickCodec(config) {
 }
 
 // 動画の書き出しの準備。書き出せない端末では null（CSVだけ作る）
-async function createWriter() {
+// analysis = true のときは、先生とのずれを赤で示した「分析つき動画」にする（上に帯、下に数値のパネルが付く）
+async function createWriter(analysis) {
   if (!('VideoEncoder' in window)) return null;
-  const W = state.outW, H = state.outH;
+  const VW = state.outW, VH = state.outH;
+  const L = analysis ? panelLayout(VW) : null;
+  const W = VW, H = analysis ? L.head + VH + L.panel : VH;
   const outFps = state.fps * state.speed; // 1/2倍速では1コマを2倍の長さで、2倍速では半分の長さで見せる
   const base = { width: W, height: H, bitrate: Math.max(1_500_000, Math.round(W * H * outFps * 0.25)), framerate: outFps };
   const codec = await pickCodec(base);
@@ -878,16 +914,22 @@ async function createWriter() {
   const ctx = canvas.getContext('2d');
   const dur = 1e6 / outFps;
   const keyEvery = Math.max(1, Math.round(outFps * 2));
+  const encode = async (i) => {
+    if (failure) throw failure;
+    const vf = new VideoFrame(canvas, { timestamp: Math.round(i * dur), duration: Math.round(dur) });
+    encoder.encode(vf, { keyFrame: i % keyEvery === 0 });
+    vf.close();
+    while (encoder.encodeQueueSize > 6) await sleep(4);
+  };
+  const judge = analysis ? createJudge(VW, VH, L, ctx, encode) : null;
   return {
-    async add(frame, i) {
-      if (failure) throw failure;
+    async add(frame, i, total) {
+      if (judge) { await judge.push(frame, i, total); return; }
       drawScene(ctx, frame);
-      const vf = new VideoFrame(canvas, { timestamp: Math.round(i * dur), duration: Math.round(dur) });
-      encoder.encode(vf, { keyFrame: i % keyEvery === 0 });
-      vf.close();
-      while (encoder.encodeQueueSize > 6) await sleep(4);
+      await encode(i);
     },
     async finish() {
+      if (judge) await judge.flush();
       await encoder.flush();
       if (failure) throw failure;
       encoder.close();
@@ -895,6 +937,276 @@ async function createWriter() {
       return new Blob([target.buffer], { type: 'video/mp4' });
     },
   };
+}
+
+// ---------- 分析つき動画（先生とのずれを赤で示す） ----------
+// 判定基準はClaudeの分析用ページ（ダンス練習分析）の v1 と同じ。基準を直したら、ここも合わせる
+const JUDGE = { version: 'v1', elbowDrop: 0.15, armRaise: 30, knee: 25, foot: 0.20, tilt: 10, minRun: 0.1 };
+const J_IDS = ['elbowDropL', 'elbowDropR', 'armRaiseL', 'armRaiseR', 'knee', 'foot', 'tilt'];
+const J_DIR = { elbowDropL: 'up', elbowDropR: 'up', armRaiseL: 'abs', armRaiseR: 'abs', knee: 'up', foot: 'down', tilt: 'down' };
+const J_TH = { elbowDropL: 'elbowDrop', elbowDropR: 'elbowDrop', armRaiseL: 'armRaise', armRaiseR: 'armRaise', knee: 'knee', foot: 'foot', tilt: 'tilt' };
+const J_ROWS = [
+  { name: '膝の曲げ', key: 'knee', ids: ['knee'], scale: 90, unit: '°', lane: '膝' },
+  { name: '足の上がり', key: 'foot', ids: ['foot'], scale: 80, unit: '', lane: '足' },
+  { name: '肩の傾き', key: 'tilt', ids: ['tilt'], scale: 40, unit: '°', lane: '肩' },
+  { name: '肘の上がり', key: 'arm', ids: ['armRaiseL', 'armRaiseR'], scale: 120, unit: '°', lane: '肘↑' },
+  { name: '肘の落ち', key: 'drop', ids: ['elbowDropL', 'elbowDropR'], scale: 60, unit: '', lane: '肘↓' },
+];
+const J_COLOR = { bg: '#14181E', panel: '#181D24', track: '#2E3640', red: '#EB4034', redbg: '#5C1C1C', white: '#F0F2F5', muted: '#96A0AC', green: '#46D282', yellow: '#FFD65A' };
+
+function panelLayout(VW) {
+  const u = VW / 960;
+  const even = (v) => Math.round(v / 2) * 2;
+  return { u, head: even(70 * u), panel: even(440 * u) };
+}
+
+// 1人分の判定用の値（ピクセル）。自信の低い点は使わない
+function judgeValues(p, floor) {
+  if (!p) return null;
+  const P = (i) => px(p, i);
+  const ok = (...ids) => ids.every((i) => p[i * 3 + 2] >= VIS_MIN);
+  const sh = { x: (P(11).x + P(12).x) / 2, y: (P(11).y + P(12).y) / 2 }, hip = { x: (P(23).x + P(24).x) / 2, y: (P(23).y + P(24).y) / 2 };
+  const torso = Math.hypot(sh.x - hip.x, sh.y - hip.y);
+  if (!torso || torso < state.vh * 0.04) return null; // 胴が小さすぎるのは検出の失敗
+  const v = {};
+  for (const [k, s, e, w, h, kn, an] of [['L', 11, 13, 15, 23, 25, 27], ['R', 12, 14, 16, 24, 26, 28]]) {
+    v['elbowDrop' + k] = ok(e, w) ? (P(e).y - P(w).y) / torso : null;
+    v['armRaise' + k] = ok(s, e) ? armRaise(P(s), P(e)) : null;
+    v['kneeA' + k] = ok(h, kn, an) ? angle3(P(h), P(kn), P(an)) : null;
+    v['lift' + k] = floor !== null && ok(an) ? (floor - P(an).y) / torso : null;
+    if (v["lift" + k] !== null && (v["lift" + k] > 1.5 || v["lift" + k] < -0.5)) v["lift" + k] = null; // 足首の取り違えなど、ありえない高さは使わない
+    if (v['armRaise' + k] === '') v['armRaise' + k] = null;
+    if (v['kneeA' + k] === '') v['kneeA' + k] = null;
+  }
+  const knees = [['L', v.kneeAL], ['R', v.kneeAR]].filter((x) => x[1] !== null).sort((a, b) => a[1] - b[1]);
+  v.knee = knees.length ? knees[0][1] : null; v.kneeSide = knees.length ? knees[0][0] : null;
+  const lifts = [['L', v.liftL], ['R', v.liftR]].filter((x) => x[1] !== null).sort((a, b) => b[1] - a[1]);
+  v.foot = lifts.length ? lifts[0][1] : null; v.footSide = lifts.length ? lifts[0][0] : null;
+  v.tilt = ok(11, 12) ? Math.atan2(Math.abs(P(11).y - P(12).y), Math.abs(P(11).x - P(12).x)) * 180 / Math.PI : null;
+  return v;
+}
+
+function judgeShow(v, key) {
+  if (!v) return null;
+  if (key === 'knee') return v.knee === null ? null : 180 - v.knee;
+  if (key === 'foot') return v.foot === null ? null : Math.max(0, v.foot * 100);
+  if (key === 'tilt') return v.tilt;
+  const a = key === 'arm' ? [v.armRaiseL, v.armRaiseR] : [v.elbowDropL, v.elbowDropR];
+  const b = a.filter((x) => x !== null);
+  if (!b.length) return null;
+  return key === 'arm' ? Math.max(...b) : Math.max(0, Math.max(...b) * 100);
+}
+
+function createJudge(VW, VH, L, ctx, encode) {
+  const u = L.u;
+  const minSamples = Math.max(1, Math.round(JUDGE.minRun * state.fps) + 1);
+  const look = minSamples - 1;            // 何コマ先まで見てから決めるか
+  const scene = [];                        // 判定待ちのコマ（骨格つきの絵を持っておく）
+  const raw = Object.fromEntries(J_IDS.map((id) => [id, []]));   // コマごとの「基準を超えたか」
+  const dev = Object.fromEntries(J_IDS.map((id) => [id, []]));   // 続いた時間も満たした「ずれ」
+  const maxV = { t: {}, b: {} };
+  const ankles = { A: [], B: [] };
+  const floor = { A: null, B: null };
+  let total = 1;
+
+  // 床の高さ：足首が床に着いているときの高さ（これまでの足首の位置の95%点）
+  const updateFloor = (key, p, i) => {
+    if (!p) return;
+    for (const a of [27, 28]) if (p[a * 3 + 2] >= VIS_MIN) ankles[key].push(p[a * 3 + 1] * state.vh);
+    if (i % 15 === 0 || floor[key] === null) {
+      const s = [...ankles[key]].sort((x, y) => x - y);
+      if (s.length) floor[key] = s[Math.floor((s.length - 1) * 0.95)];
+    }
+  };
+
+  async function push(frame, i, n) {
+    total = n;
+    updateFloor('A', frame.A, i);
+    updateFloor('B', frame.B, i);
+    const tv = judgeValues(frame.A, floor.A), bv = judgeValues(frame.B, floor.B);
+    for (const id of J_IDS) {
+      const a = tv?.[id] ?? null, b = bv?.[id] ?? null;
+      let r = null;
+      if (a !== null && b !== null && !frame.overlap) {
+        const d = J_DIR[id] === 'up' ? b - a : J_DIR[id] === 'down' ? a - b : Math.abs(b - a);
+        r = d >= JUDGE[J_TH[id]];
+      }
+      raw[id][i] = r;
+    }
+    const c = document.createElement('canvas');
+    c.width = VW; c.height = VH;
+    drawScene(c.getContext('2d'), frame, false);
+    scene.push({ frame, i, c, tv, bv });
+    while (scene.length > look) await finalize(scene.shift());
+  }
+
+  async function flush() {
+    while (scene.length) await finalize(scene.shift());
+  }
+
+  // ずれは「基準を超えた状態が続いた時間」が minRun 以上のときだけ数える
+  function isDev(id, i) {
+    if (raw[id][i] !== true) return false;
+    let back = 0, fwd = 0;
+    for (let k = i - 1; k >= 0 && raw[id][k] === true; k--) back++;
+    for (let k = i + 1; raw[id][k] === true; k++) fwd++;
+    return back + 1 + fwd >= minSamples;
+  }
+
+  async function finalize(s) {
+    const { frame, i, tv, bv } = s;
+    for (const id of J_IDS) dev[id][i] = isDev(id, i);
+    for (const r of J_ROWS) {
+      for (const [k, v] of [['t', tv], ['b', bv]]) {
+        const x = frame.overlap ? null : judgeShow(v, r.key);
+        if (x !== null) maxV[k][r.key] = Math.max(maxV[k][r.key] ?? 0, x);
+      }
+    }
+    const W = VW;
+    ctx.fillStyle = J_COLOR.bg;
+    ctx.fillRect(0, 0, W, ctx.canvas.height);
+    ctx.drawImage(s.c, 0, L.head);
+    const msgs = drawDeviations(ctx, frame, tv, bv, i);
+    drawHead(ctx, frame, msgs, bv);
+    drawPanel(ctx, frame, tv, bv, i);
+    await encode(i);
+  }
+
+  // ---- 描き方 ----
+  const font = (size) => `700 ${Math.round(size * u)}px "BIZ UDPGothic", "Hiragino Sans", sans-serif`;
+  const pt = (p, idx) => ({ x: p[idx * 3] * VW, y: L.head + p[idx * 3 + 1] * VH, v: p[idx * 3 + 2] });
+  function label(text, x, y, fg, bg, size = 13) {
+    ctx.font = font(size);
+    const w = ctx.measureText(text).width + 8 * u, h = (size + 7) * u;
+    const bx = Math.max(2, Math.min(VW - w - 2, x));
+    ctx.fillStyle = bg;
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(bx, y, w, h, 4 * u) : ctx.rect(bx, y, w, h);
+    ctx.fill();
+    ctx.fillStyle = fg;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, bx + 4 * u, y + h / 2);
+  }
+  function line(p, a, b) {
+    if (!p || p[a * 3 + 2] < 0.05 || p[b * 3 + 2] < 0.05) return;
+    const A = pt(p, a), B = pt(p, b);
+    ctx.strokeStyle = J_COLOR.red; ctx.lineWidth = Math.max(3, 6 * u); ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.stroke();
+  }
+  function ring(p, idx, color, r = 10) {
+    if (!p || p[idx * 3 + 2] < 0.05) return;
+    const A = pt(p, idx);
+    ctx.strokeStyle = color; ctx.lineWidth = Math.max(2, 3 * u);
+    ctx.beginPath(); ctx.arc(A.x, A.y, r * u, 0, Math.PI * 2); ctx.stroke();
+  }
+  function angleLabels(p, v) {
+    if (!p || !v) return;
+    const dark = 'rgba(12,14,18,0.85)';
+    if (v.tilt !== null && p[CHIN * 3 + 2] >= 0.05) { const c = pt(p, CHIN); label(`肩 ${Math.round(v.tilt)}°`, c.x - 20 * u, c.y + 2 * u, J_COLOR.white, dark); }
+    for (const [k, e, left] of [['L', 13, true], ['R', 14, false]]) {
+      if (v['armRaise' + k] === null) continue;
+      const E = pt(p, e);
+      label(`肘 ${Math.round(v['armRaise' + k])}°`, left ? E.x + 8 * u : E.x - 50 * u, E.y - 8 * u, J_COLOR.white, dark);
+    }
+    if (v.knee !== null) { const K = pt(p, v.kneeSide === 'L' ? 25 : 26); label(`膝 ${Math.round(v.knee)}°`, K.x + 8 * u, K.y - 8 * u, J_COLOR.white, dark); }
+  }
+
+  function drawDeviations(c, frame, tv, bv, i) {
+    const T = frame.A, B = frame.B, msgs = [];
+    if (!frame.overlap) { angleLabels(T, tv); angleLabels(B, bv); }
+    if (T && tv && tv.foot !== null && tv.foot >= 0.15 && !frame.overlap) {
+      const idx = tv.footSide === 'L' ? 27 : 28;
+      ring(T, idx, J_COLOR.green);
+      const A = pt(T, idx); label('足上げ', A.x + 12 * u, A.y - 8 * u, J_COLOR.green, 'rgba(12,14,18,0.85)');
+    }
+    if (!B || !bv) return msgs;
+    for (const [k, s, e, w] of [['L', 11, 13, 15], ['R', 12, 14, 16]]) {
+      const notes = [];
+      if (dev['elbowDrop' + k][i]) notes.push('肘が落ちている');
+      if (dev['armRaise' + k][i]) notes.push(bv['armRaise' + k] > (tv?.['armRaise' + k] ?? 0) ? '肘が上がりすぎ' : '肘が低い');
+      if (!notes.length) continue;
+      line(B, s, e); line(B, e, w); ring(B, e, J_COLOR.red); ring(T, e, J_COLOR.white, 9);
+      const E = pt(B, e);
+      notes.forEach((t, j) => label(t, E.x - 50 * u, E.y + (14 + j * 21) * u, J_COLOR.white, J_COLOR.red));
+      msgs.push(...notes);
+    }
+    if (dev.tilt[i]) {
+      line(B, 11, 12);
+      const a = pt(B, 11), b = pt(B, 12);
+      label('肩の傾き不足', (a.x + b.x) / 2 - 40 * u, Math.min(a.y, b.y) - 26 * u, J_COLOR.white, J_COLOR.red);
+      msgs.push('肩の傾き不足');
+    }
+    if (dev.knee[i] && bv.kneeSide) {
+      const [h, k2, a] = bv.kneeSide === 'L' ? [23, 25, 27] : [24, 26, 28];
+      line(B, h, k2); line(B, k2, a); ring(B, k2, J_COLOR.red);
+      const K = pt(B, k2); label('膝が浅い', K.x - 70 * u, K.y + 12 * u, J_COLOR.white, J_COLOR.red);
+      msgs.push('膝が浅い');
+    }
+    if (dev.foot[i] && bv.footSide) {
+      const a = bv.footSide === 'L' ? 27 : 28;
+      ring(B, a, J_COLOR.red);
+      const A = pt(B, a); label('足が低い', A.x + 12 * u, A.y - 10 * u, J_COLOR.white, J_COLOR.red);
+      msgs.push('足が低い');
+    }
+    return [...new Set(msgs)];
+  }
+
+  function drawHead(c, frame, msgs, bv) {
+    c.fillStyle = J_COLOR.bg;
+    c.fillRect(0, 0, VW, L.head);
+    c.textBaseline = 'top';
+    c.font = font(15); c.fillStyle = J_COLOR.muted;
+    c.fillText(`元の動画 ${frame.t.toFixed(1)}秒　${SPEED_LABEL[state.speed] ?? `${state.speed}倍速`}　判定基準 ${JUDGE.version}`, 14 * u, 6 * u);
+    c.font = font(24);
+    if (msgs.length) { c.fillStyle = J_COLOR.red; c.fillText('赤：先生とずれている部分 → ' + msgs.join('・'), 14 * u, 30 * u); }
+    else if (frame.overlap || !frame.A || !frame.B) { c.fillStyle = J_COLOR.yellow; c.fillText('2人が重なっているか見失ったコマ（比べていません）', 14 * u, 30 * u); }
+    else { c.fillStyle = J_COLOR.white; c.fillText('先生とのずれは出ていません', 14 * u, 30 * u); }
+  }
+
+  function drawPanel(c, frame, tv, bv, i) {
+    const y0 = L.head + VH, W = VW;
+    c.fillStyle = J_COLOR.panel;
+    c.fillRect(0, y0, W, L.panel);
+    c.textBaseline = 'top';
+    c.font = font(15); c.fillStyle = J_COLOR.muted;
+    c.fillText('今の値（バー）とここまでの最大（白い線）。赤い行＝今ずれている部分', 14 * u, y0 + 8 * u);
+    const rh = 56 * u, ry = y0 + 36 * u, bx0 = 150 * u, bx1 = W - 150 * u;
+    J_ROWS.forEach((r, n) => {
+      const y = ry + n * rh;
+      const on = r.ids.some((id) => dev[id][i]);
+      if (on) { c.fillStyle = J_COLOR.redbg; c.fillRect(0, y, W, rh - 4 * u); }
+      c.font = font(20); c.fillStyle = on ? J_COLOR.red : J_COLOR.white;
+      c.fillText(r.name, 14 * u, y + 14 * u);
+      [['t', tv, COLOR.teacher, '先生 '], ['b', bv, COLOR.beginner, '初心者 ']].forEach(([k, v, col, who], j) => {
+        const by = y + (6 + j * 24) * u, bh = 16 * u;
+        c.fillStyle = J_COLOR.track; c.fillRect(bx0, by, bx1 - bx0, bh);
+        const x = frame.overlap ? null : judgeShow(v, r.key);
+        if (x !== null) { c.fillStyle = col; c.fillRect(bx0, by, (bx1 - bx0) * Math.max(0, Math.min(1, x / r.scale)), bh); }
+        const mx = maxV[k][r.key];
+        if (mx !== undefined) { c.fillStyle = J_COLOR.white; c.fillRect(bx0 + (bx1 - bx0) * Math.min(1, mx / r.scale) - u, by - 2 * u, 2 * u, bh + 4 * u); }
+        c.font = font(15); c.fillStyle = col;
+        c.fillText(who + (x === null ? '—' : `${Math.round(x)}${r.unit}`), bx1 + 10 * u, by - 2 * u);
+      });
+    });
+    // ずれのタイミング（再生に合わせて左から埋まる）
+    const ty = ry + J_ROWS.length * rh + 6 * u;
+    c.font = font(15); c.fillStyle = J_COLOR.muted;
+    c.fillText('ずれの出たタイミング', 14 * u, ty);
+    const lx0 = 60 * u, lx1 = W - 20 * u, lh = 14 * u, span = Math.max(1, total);
+    J_ROWS.forEach((r, n) => {
+      const y = ty + 26 * u + n * (lh + 4 * u);
+      c.font = font(13); c.fillStyle = J_COLOR.muted; c.fillText(r.lane, 14 * u, y - 2 * u);
+      c.fillStyle = J_COLOR.track; c.fillRect(lx0, y, lx1 - lx0, lh);
+      c.fillStyle = J_COLOR.red;
+      const wpx = (lx1 - lx0) / span;
+      for (let k = 0; k <= i; k++) if (r.ids.some((id) => dev[id][k])) c.fillRect(lx0 + k * wpx, y, Math.max(1, wpx + 0.5), lh);
+    });
+    const xp = lx0 + (lx1 - lx0) * (i + 0.5) / span;
+    c.fillStyle = J_COLOR.white;
+    c.fillRect(xp - u, ty + 22 * u, 2 * u, J_ROWS.length * (lh + 4 * u) + 4 * u);
+  }
+
+  return { push, flush };
 }
 
 async function analyze() {
@@ -908,7 +1220,8 @@ async function analyze() {
   let prevA = needT() ? state.pickPoses[state.teacherIdx] : null;
   let prevB = needB() ? state.pickPoses[state.beginnerIdx] : null;
   let lostA = 0, lostB = 0, overlaps = 0;
-  const writer = await createWriter();
+  state.analysisVideo = $('video-kind').value === 'analysis' && state.target === 'both';
+  const writer = await createWriter(state.analysisVideo);
   const t0 = performance.now();
   message('analyze-info', '終わるまでこの画面を開いたままにしてください。');
   for (let i = 0; i < n; i++) {
@@ -926,7 +1239,7 @@ async function analyze() {
     if (frame.overlap) overlaps++;
     state.frames.push(frame);
     // 同じコマを、そのまま動画に書き込む
-    if (writer) await writer.add(frame, i);
+    if (writer) await writer.add(frame, i, n);
     if (i % 3 === 0 || i === n - 1) {
       bar.style.width = `${((i + 1) / n) * 100}%`;
       const left = ((performance.now() - t0) / (i + 1)) * (n - i - 1) / 1000;
@@ -1032,6 +1345,7 @@ function buildCsv() {
     `# video_size_px: ${state.vw}x${state.vh}`,
     `# video_duration_s: ${state.duration.toFixed(2)}`,
     `# target: ${state.target} (${TARGET_LABEL[state.target]})`,
+    `# video: ${state.analysisVideo ? `analysis (deviations drawn with criteria ${JUDGE.version})` : 'skeleton only'}`,
     `# analyzed_range_s: ${state.start.toFixed(1)}-${state.end.toFixed(1)}`,
     `# analysis_fps: ${state.fps} / sample_interval_s: 0.1`,
     `# model: MediaPipe Pose Landmarker ${state.model} (${MEDIAPIPE_VERSION}, ${state.delegate})`,
@@ -1097,7 +1411,7 @@ async function saveBlob(blob, filename) {
   setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
 }
 
-$('save-video').addEventListener('click', () => state.videoBlob && saveBlob(state.videoBlob, `${baseName()}_MediaPipePose.mp4`));
+$('save-video').addEventListener('click', () => state.videoBlob && saveBlob(state.videoBlob, `${baseName()}_MediaPipePose${state.analysisVideo ? '_分析' : ''}.mp4`));
 $('save-csv').addEventListener('click', () => state.csvBlob && saveBlob(state.csvBlob, `${baseName()}_MediaPipePose.csv`));
 
 // 動作確認用：?src=動画のURL で動画を読み込む

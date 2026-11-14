@@ -55,6 +55,13 @@
         </select>
       </label>
       <label class="field">
+        <span>書き出す動画</span>
+        <select id="video-kind">
+          <option value="skeleton" selected>骨格だけ</option>
+          <option value="analysis">ずれの分析つき（2人のときだけ）</option>
+        </select>
+      </label>
+      <label class="field">
         <span>解析の開始（秒）</span>
         <span class="row">
           <input type="number" id="start" min="0" step="0.1" value="0" inputmode="decimal">
