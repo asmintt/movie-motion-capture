@@ -1,10 +1,12 @@
 // ムービー・モーションキャプチャ
 // 練習動画から先生と初心者の骨格を検出し、骨格つき動画（MP4）と骨格データ（CSV）を書き出す。
 // 処理はすべてブラウザの中で行い、動画はどこにも送らない。
-import { PoseLandmarker, FaceLandmarker } from './lib/vision_bundle.mjs';
+import { PoseLandmarker } from './lib/vision_bundle.mjs';
 import { Muxer, ArrayBufferTarget } from './lib/mp4-muxer.mjs';
 
-const APP_VERSION = 'v2';
+const APP_VERSION = 'v3';
+// 骨格AIを動かすのは毎秒10コマ。書き出す動画の間のコマは、前後の結果から補間する
+const ANALYZE_FPS = 10;
 // 分析用Artifact「ダンス練習分析」のURL。作ったらここに入れる（空のあいだはコピーだけ行う）
 const ANALYSIS_URL = 'https://claude.ai/artifact/M5aJy3Tk7ZBjCZ2r7NHmX9';
 const MEDIAPIPE_VERSION = 'tasks-vision 0.10.14';
@@ -17,13 +19,11 @@ const VIS_MIN = 0.5;   // これ未満の点は「AIの自信が低い」とし�
 const SPEED_LABEL = { 0.25: '1/4倍速', 0.5: '1/2倍速', 1: '等倍', 2: '2倍速' };
 const TARGET_LABEL = { both: '2人', teacher: '先生のみ', beginner: '初心者のみ' };
 
-// 骨格AIの33点のあとに、頭の2点を足して持つ
-//   33 顎先：顔用AI（Face Landmarker）の顎先の点
-//   34 頭頂部：顎先と額の上端から推定（AIの点ではない）
-// 顔用AIが顔を見つけられないコマは、骨格AIの目と口から両方を推定し、自信を 0.4（灰色）にする
+// 骨格AIの33点のあとに、頭の2点を足して持つ（どちらもAIの点ではなく、骨格AIの目と口からの推定）
+//   33 顎先
+//   34 頭頂部
+// 比率は、最初のコマ（人を選んだときに手で直した場合は直した後）の位置から測る
 const CHIN = 33, HEAD_TOP = 34, NPTS = 35;
-const HEAD_TOP_RATIO = 1.3; // 顎先→額の上端 の長さを1.3倍すると、おおよそ頭頂部に届く
-const ESTIMATED_VIS = 0.4;
 
 // CSVに書き出す点
 const POINTS = {
@@ -46,7 +46,8 @@ const state = {
   file: null, name: '', url: null,
   duration: 0, vw: 0, vh: 0, outW: 0, outH: 0,
   start: 0, end: 0, speed: 0.5, model: 'full', fps: 30, target: 'both',
-  landmarker: null, landmarkerModel: null, delegate: '', face: null,
+  landmarker: null, landmarkerModel: null, delegate: '',
+  headK: { A: null, B: null }, // 頭の2点を推定するときの比率（人ごと）
   pickPoses: [], pickOriginal: [], teacherIdx: null, beginnerIdx: null, edited: false,
   frames: [],   // { t, A, B, overlap }  A = 先生として選んだ人、B = 初心者として選んだ人（対象外はnull）
   videoBlob: null, csvBlob: null, csvText: '',
@@ -54,8 +55,10 @@ const state = {
 };
 window.__mmc = state; // 動作確認用
 
-const video = $('video');     // 解析用（画面には出さない）
+const video = $('video');     // 解析用（解析中だけ小さく表示する。表示されていないと、再生中のコマを受け取れない端末がある）
 const preview = $('preview'); // 設定用のプレビュー
+// 骨格AIに渡す絵の元。人を選ぶときは動画そのもの、解析中は写し取ったコマ
+let source = video;
 
 // ---------- 画面の状態 ----------
 const STEPS = ['step-file', 'step-settings', 'step-pick', 'step-analyze', 'step-export'];
@@ -143,7 +146,7 @@ async function handleFile(file) {
   $('start').value = '0';
   $('end').value = (Math.floor(state.duration * 10) / 10).toFixed(1);
   $('start').max = $('end').max = state.duration.toFixed(1);
-  const long = state.duration > 60 ? '　1分を超えています。解析する範囲を短くするのがおすすめです。' : '';
+  const long = state.duration > 60 ? '　1分を超える動画は、パソコンのブラウザで解析すると速く終わります。' : '';
   message('file-info', `${state.name}（${state.duration.toFixed(1)}秒・${state.vw}×${state.vh}）${long}`);
   setStep('step-file', 'done');
   setStep('step-settings', 'active');
@@ -218,39 +221,17 @@ async function getLandmarker(model, forceCpu = false) {
   return lm;
 }
 
-// 1人分の点を [x, y, 自信] ×35 の配列にまとめる（x, y は 0〜1）。頭の2点はあとで addHead が埋める
+// 1人分の点を [x, y, 自信] ×35 の配列にまとめる（x, y は 0〜1）。頭の2点はあとで estimateHead が埋める
 function pack(landmarks) {
   const a = new Float32Array(NPTS * 3);
   landmarks.forEach((p, i) => { a[i * 3] = p.x; a[i * 3 + 1] = p.y; a[i * 3 + 2] = p.visibility ?? 1; });
   return a;
 }
 
-// ---------- 顔（顎先・頭頂部） ----------
-async function getFaceLandmarker() {
-  if (state.face) return state.face;
-  const fileset = {
-    wasmLoaderPath: asset('lib/wasm/vision_wasm_internal.js'),
-    wasmBinaryPath: asset('lib/wasm/vision_wasm_internal.wasm'),
-  };
-  const options = (delegate) => ({
-    baseOptions: { modelAssetPath: asset('lib/models/face_landmarker.task'), delegate },
-    runningMode: 'IMAGE',
-    numFaces: 1,
-    minFaceDetectionConfidence: 0.3,
-    minFacePresenceConfidence: 0.3,
-  });
-  try { state.face = await FaceLandmarker.createFromOptions(fileset, options('GPU')); } catch { state.face = null; }
-  if (!state.face) state.face = await FaceLandmarker.createFromOptions(fileset, options('CPU'));
-  return state.face;
-}
-
-const FACE = 256;
-const faceCanvas = document.createElement('canvas');
-faceCanvas.width = faceCanvas.height = FACE;
-
-// 顔用AIが顔を見つけられないときの推定。目の真ん中 e → 口の真ん中 m を u とし、
+// ---------- 頭（顎先・頭頂部） ----------
+// 顔用AIは使わず、骨格AIの目と口から推定する。目の真ん中 e → 口の真ん中 m を u とし、
 // u とそれに直交する向き n を物差しにして、顎先は m から、頭頂部は e からの位置で表す。
-// 最初は大人の顔の一般的な比率を使い、解析後にその人の「顔が見つかったコマ」から測った比率で直す
+// 比率は人ごとに、最初のコマの頭の2点から測る（手で直した場合は直した位置）。測れないときは大人の顔の一般的な比率
 const HEAD_RATIO_DEFAULT = { ca: 0.7, cb: 0, ta: -1.65, tb: 0 };
 
 function faceFrame(p) {
@@ -263,69 +244,30 @@ function faceFrame(p) {
   return { e, m, u, n: { x: -u.y, y: u.x } };
 }
 
+// 頭の2点を推定して p に書き込む。自信は、目と口の4点の自信の一番低い値（目や口が見えないと灰色になる）
 function estimateHead(p, k = HEAD_RATIO_DEFAULT) {
   const f = faceFrame(p);
-  if (!f) return;
+  if (!f) { p[CHIN * 3 + 2] = p[HEAD_TOP * 3 + 2] = 0; return p; }
   const { e, m, u, n } = f;
   p[CHIN * 3] = (m.x + u.x * k.ca + n.x * k.cb) / state.vw;
   p[CHIN * 3 + 1] = (m.y + u.y * k.ca + n.y * k.cb) / state.vh;
   p[HEAD_TOP * 3] = (e.x + u.x * k.ta + n.x * k.tb) / state.vw;
   p[HEAD_TOP * 3 + 1] = (e.y + u.y * k.ta + n.y * k.tb) / state.vh;
-  p[CHIN * 3 + 2] = p[HEAD_TOP * 3 + 2] = ESTIMATED_VIS;
-}
-
-// 同じ人の「顔が見つかったコマ」から比率を測り（中央値）、推定したコマを測った比率で直す
-function calibrateHeads(role) {
-  const median = (a) => { const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
-  const samples = { ca: [], cb: [], ta: [], tb: [] };
-  for (const fr of state.frames) {
-    const p = fr[role];
-    if (!p || p[CHIN * 3 + 2] < 0.99) continue;
-    const f = faceFrame(p);
-    if (!f) continue;
-    const L = f.u.x ** 2 + f.u.y ** 2;
-    const c = { x: p[CHIN * 3] * state.vw - f.m.x, y: p[CHIN * 3 + 1] * state.vh - f.m.y };
-    const t = { x: p[HEAD_TOP * 3] * state.vw - f.e.x, y: p[HEAD_TOP * 3 + 1] * state.vh - f.e.y };
-    samples.ca.push((c.x * f.u.x + c.y * f.u.y) / L); samples.cb.push((c.x * f.n.x + c.y * f.n.y) / L);
-    samples.ta.push((t.x * f.u.x + t.y * f.u.y) / L); samples.tb.push((t.x * f.n.x + t.y * f.n.y) / L);
-  }
-  if (samples.ca.length < 5) return null; // 顔が見つかったコマが少なすぎるときは一般的な比率のまま
-  const k = { ca: median(samples.ca), cb: median(samples.cb), ta: median(samples.ta), tb: median(samples.tb) };
-  for (const fr of state.frames) {
-    const p = fr[role];
-    if (p && Math.abs(p[CHIN * 3 + 2] - ESTIMATED_VIS) < 1e-3) estimateHead(p, k);
-  }
-  return samples.ca.length;
-}
-
-// 骨格の鼻・耳の位置から顔のまわりを切り出し、顔用AIで顎先と額の上端を探す
-async function addHead(p) {
-  const P = (i) => px(p, i);
-  p[CHIN * 3 + 2] = p[HEAD_TOP * 3 + 2] = 0;
-  const nose = P(0);
-  if (nose.v < 0.3 || !state.face) { estimateHead(p); return p; }
-
-  const ear = Math.hypot(P(7).x - P(8).x, P(7).y - P(8).y);
-  const shoulder = Math.hypot(P(11).x - P(12).x, P(11).y - P(12).y);
-  const side = Math.max(ear * 2.6, shoulder * 0.8, 40);
-  const x0 = nose.x - side / 2, y0 = nose.y - side * 0.55;
-  const ctx = faceCanvas.getContext('2d');
-  ctx.fillStyle = '#000';
-  ctx.fillRect(0, 0, FACE, FACE);
-  ctx.drawImage(video, x0, y0, side, side, 0, 0, FACE, FACE);
-  let lm;
-  try { lm = state.face.detect(faceCanvas).faceLandmarks[0]; } catch { lm = null; }
-  if (!lm) { estimateHead(p); return p; }
-  const toFrame = (q) => ({ x: (x0 + q.x * side) / state.vw, y: (y0 + q.y * side) / state.vh });
-  const chin = toFrame(lm[152]), brow = toFrame(lm[10]); // 152 = 顎先、10 = 額の上端
-  // 見つけた顔が、この人の鼻の近くでなければ使わない（隣の人の顔を拾うのを防ぐ）
-  const faceNose = toFrame(lm[1]);
-  if (Math.hypot((faceNose.x - p[0]) * state.vw, (faceNose.y - p[1]) * state.vh) > ear * 0.8 + 6) { estimateHead(p); return p; }
-  p[CHIN * 3] = chin.x; p[CHIN * 3 + 1] = chin.y; p[CHIN * 3 + 2] = 1;
-  p[HEAD_TOP * 3] = chin.x + (brow.x - chin.x) * HEAD_TOP_RATIO;
-  p[HEAD_TOP * 3 + 1] = chin.y + (brow.y - chin.y) * HEAD_TOP_RATIO;
-  p[HEAD_TOP * 3 + 2] = 1;
+  p[CHIN * 3 + 2] = p[HEAD_TOP * 3 + 2] = Math.min(p[2 * 3 + 2], p[5 * 3 + 2], p[9 * 3 + 2], p[10 * 3 + 2]);
   return p;
+}
+
+// 最初のコマの頭の2点から、その人の比率を測る（estimateHead の逆算）
+function headRatio(p) {
+  const f = p && faceFrame(p);
+  if (!f || p[CHIN * 3 + 2] < 0.05 || p[HEAD_TOP * 3 + 2] < 0.05) return HEAD_RATIO_DEFAULT;
+  const L = f.u.x ** 2 + f.u.y ** 2;
+  const c = { x: p[CHIN * 3] * state.vw - f.m.x, y: p[CHIN * 3 + 1] * state.vh - f.m.y };
+  const t = { x: p[HEAD_TOP * 3] * state.vw - f.e.x, y: p[HEAD_TOP * 3 + 1] * state.vh - f.e.y };
+  return {
+    ca: (c.x * f.u.x + c.y * f.u.y) / L, cb: (c.x * f.n.x + c.y * f.n.y) / L,
+    ta: (t.x * f.u.x + t.y * f.u.y) / L, tb: (t.x * f.n.x + t.y * f.n.y) / L,
+  };
 }
 
 async function detect(src) {
@@ -350,7 +292,7 @@ async function detectRegion(x0, y0, w, h) {
   const ox = (CROP - w * s) / 2, oy = (CROP - h * s) / 2;
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, CROP, CROP);
-  ctx.drawImage(video, x0, y0, w, h, ox, oy, w * s, h * s);
+  ctx.drawImage(source, x0, y0, w, h, ox, oy, w * s, h * s);
   const poses = await detect(cropCanvas);
   for (const p of poses) {
     for (let i = 0; i < 33; i++) {
@@ -571,9 +513,10 @@ function rolesOf(frame) {
   return { teacher: frame.A, beginner: frame.B };
 }
 
-function drawScene(ctx, frame, caption = true) {
+// img：背景にする動画のコマ（写し取ったコマ。省略すると動画そのもの）
+function drawScene(ctx, frame, caption = true, img = video) {
   const W = ctx.canvas.width, H = ctx.canvas.height;
-  ctx.drawImage(video, 0, 0, W, H);
+  ctx.drawImage(img, 0, 0, W, H);
   if (!frame) return;
   const r = rolesOf(frame);
   drawSkeleton(ctx, r.beginner, COLOR.beginner);
@@ -583,10 +526,16 @@ function drawScene(ctx, frame, caption = true) {
   if (caption) tag(ctx, `${SPEED_LABEL[state.speed] ?? `${state.speed}倍速`}　${frame.t.toFixed(1)}秒`, 0, Math.min(W, H) / 12, 'rgba(0,0,0,0.6)');
 }
 
+// 時刻 t に一番近い「骨格AIを動かしたコマ」（補間したコマではなく、実際に検出したコマ）
 function frameAt(t) {
   if (!state.frames.length) return null;
-  const i = Math.round((t - state.start) * state.fps);
-  return state.frames[Math.max(0, Math.min(state.frames.length - 1, i))];
+  const c = Math.round((t - state.start) * state.fps);
+  let best = null;
+  for (let i = Math.max(0, c - 3); i <= Math.min(state.frames.length - 1, c + 3); i++) {
+    const f = state.frames[i];
+    if (f?.key && (!best || Math.abs(f.t - t) < Math.abs(best.t - t))) best = f;
+  }
+  return best ?? state.frames[Math.max(0, Math.min(state.frames.length - 1, c))];
 }
 
 // ---------- 3. 人を選ぶ ----------
@@ -635,7 +584,7 @@ function drawPick() {
       ctx.strokeStyle = '#FFFFFF';
       ctx.fillStyle = color;
       for (const j of HANDLES) {
-        if (p[j * 3 + 2] < 0.05) continue; // 顔が見つからなかったときの顎先・頭頂部
+        if (p[j * 3 + 2] < 0.05) continue; // 目や口が見えず推定できなかったときの顎先・頭頂部
         ctx.beginPath();
         ctx.arc(p[j * 3] * W, p[j * 3 + 1] * H, r, 0, Math.PI * 2);
         ctx.fill();
@@ -775,7 +724,7 @@ $('to-pick').addEventListener('click', async () => {
   try {
     state.busy = true;
     await getLandmarker(state.model);
-    await getFaceLandmarker();
+    source = video;
     el.textContent = '人を探しています…';
     await seekTo(video, state.start);
     state.pickPoses = await findPeople();
@@ -829,15 +778,11 @@ pickCanvas.addEventListener('click', async (e) => {
   if (needT() && state.teacherIdx === null) state.teacherIdx = best;
   else state.beginnerIdx = best;
   if (pickReady()) {
-    // 人が決まったら、顎先・頭頂部を探して、直せる点に加える
-    state.busy = true;
-    try {
-      for (const i of pickedIdx()) {
-        await addHead(state.pickPoses[i]);
-        state.pickOriginal[i] = state.pickPoses[i].slice();
-      }
-    } finally {
-      state.busy = false;
+    // 人が決まったら、顎先・頭頂部を目と口から推定して、直せる点に加える。
+    // ここで直した位置の比率を、解析中のすべてのコマで使う
+    for (const i of pickedIdx()) {
+      estimateHead(state.pickPoses[i]);
+      state.pickOriginal[i] = state.pickPoses[i].slice();
     }
   }
   drawPick();
@@ -923,9 +868,10 @@ async function createWriter(analysis) {
   };
   const judge = analysis ? createJudge(VW, VH, L, ctx, encode) : null;
   return {
-    async add(frame, i, total) {
-      if (judge) { await judge.push(frame, i, total); return; }
-      drawScene(ctx, frame);
+    // img：このコマの動画の絵（写し取ったもの）
+    async add(frame, i, total, img) {
+      if (judge) { await judge.push(frame, i, total, img); return; }
+      drawScene(ctx, frame, true, img);
       await encode(i);
     },
     async finish() {
@@ -1019,7 +965,7 @@ function createJudge(VW, VH, L, ctx, encode) {
     }
   };
 
-  async function push(frame, i, n) {
+  async function push(frame, i, n, img) {
     total = n;
     updateFloor('A', frame.A, i);
     updateFloor('B', frame.B, i);
@@ -1035,7 +981,7 @@ function createJudge(VW, VH, L, ctx, encode) {
     }
     const c = document.createElement('canvas');
     c.width = VW; c.height = VH;
-    drawScene(c.getContext('2d'), frame, false);
+    drawScene(c.getContext('2d'), frame, false, img);
     scene.push({ frame, i, c, tv, bv });
     while (scene.length > look) await finalize(scene.shift());
   }
@@ -1209,52 +1155,218 @@ function createJudge(VW, VH, L, ctx, encode) {
   return { push, flush };
 }
 
+// ---------- 動画を再生しながらコマを受け取る ----------
+// 1コマずつシークすると、そのたびに動画の読み直しが起きて遅い（特にiPhone）。
+// そこで開始位置へ1回だけ移動し、あとは再生して、流れてくるコマを順に受け取る。
+// 解析するコマ（key）が来たら再生を止めて解析し、終わったら再生を続ける。間のコマは絵を写し取るだけ
+const keyCanvas = document.createElement('canvas'); // 解析するコマ（元の大きさ）
+const framePool = [];                                // 間のコマ（書き出しの大きさ）。使い回す
+
+function grabFrame(isKey) {
+  if (isKey) {
+    if (keyCanvas.width !== state.vw || keyCanvas.height !== state.vh) { keyCanvas.width = state.vw; keyCanvas.height = state.vh; }
+    keyCanvas.getContext('2d').drawImage(video, 0, 0, state.vw, state.vh);
+    return keyCanvas;
+  }
+  let c = framePool.pop();
+  if (!c || c.width !== state.outW || c.height !== state.outH) {
+    c = document.createElement('canvas');
+    c.width = state.outW;
+    c.height = state.outH;
+  }
+  c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+  return c;
+}
+const releaseFrame = (c) => { if (c !== keyCanvas && framePool.length < 12) framePool.push(c); };
+
+// times：書き出す各コマの時刻。isKey(i)：骨格AIを動かすコマか。
+// onFrame(i, img)：コマ i の絵を、順番どおりに1回ずつ渡す
+// 戻り値：'play'（再生で読めた）か 'seek'（再生で読めず、1コマずつ移動して読んだ）
+async function readFrames(times, isKey, onFrame) {
+  const n = times.length;
+  let i = 0;
+  const bySeek = async () => {
+    for (; i < n; i++) {
+      await seekTo(video, times[i]);
+      await onFrame(i, grabFrame(isKey(i)));
+    }
+    return 'seek';
+  };
+  // 再生中のコマを受け取る仕組み（requestVideoFrameCallback）がない古い端末は、これまでどおりシークで読む
+  if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype)) return bySeek();
+
+  await seekTo(video, times[0]); // 開始位置へは1回だけ移動する
+  await onFrame(0, grabFrame(isKey(0)));
+  i = 1;
+  if (i >= n) return 'play';
+  const tol = 0.5 / state.fps; // 書き出しの半コマ分までの早さは同じ時刻とみなす
+
+  const how = await new Promise((resolve) => {
+    let done = false, working = false, retried = false;
+    let quiet = performance.now(); // 最後にコマを受け取った時刻（止まっていないかの見張り用）
+    // コマを受け取る予約は、いつも1つだけにする（二重に予約すると、同じコマを何度も処理する）
+    let cb = 0;
+    const arm = () => {
+      if (cb) video.cancelVideoFrameCallback(cb);
+      cb = video.requestVideoFrameCallback(onVideoFrame);
+    };
+    const end = (r) => {
+      if (done) return;
+      done = true;
+      clearInterval(watch);
+      if (cb) video.cancelVideoFrameCallback(cb);
+      video.removeEventListener('ended', onEnded);
+      video.pause();
+      resolve(r);
+    };
+    const resume = async () => {
+      if (done) return;
+      quiet = performance.now();
+      arm();
+      try { await video.play(); } catch { end('stalled'); }
+    };
+    // 受け取ったコマを順に渡す。解析するコマがあるときは、再生を止めた状態で呼ばれる
+    const handle = async (ready, imgs, hasKey) => {
+      working = true;
+      try {
+        for (let j = 0; j < ready.length; j++) await onFrame(ready[j], imgs[j]);
+      } catch (e) {
+        end(e);
+        return;
+      }
+      working = false;
+      if (i >= n) end('play');
+      else if (hasKey) resume();
+    };
+    function onVideoFrame(now, meta) {
+      cb = 0;
+      if (done) return;
+      quiet = performance.now();
+      const ready = [];
+      while (i < n && meta.mediaTime >= times[i] - tol) ready.push(i++);
+      if (!ready.length) { arm(); return; }
+      const hasKey = ready.some(isKey);
+      if (hasKey) video.pause(); // 解析のあいだに先へ進まないよう、すぐ止める
+      // 絵はこの場で写し取る（このコールバックの中なら、このコマの絵が確実に取れる）
+      const imgs = ready.map((k) => grabFrame(isKey(k)));
+      if (!hasKey && i < n) arm();
+      handle(ready, imgs, hasKey);
+    }
+    // 範囲の終わりが動画の終わりと重なったとき：残りのコマは最後の絵で埋める
+    function onEnded() {
+      if (done || working) return;
+      const ready = [];
+      while (i < n) ready.push(i++);
+      handle(ready, ready.map((k) => grabFrame(isKey(k))), true);
+    }
+    // 5秒コマが来なければ、もう一度再生を試し、それでもだめなら残りはシークで読む
+    const watch = setInterval(() => {
+      if (done || working || performance.now() - quiet < 5000) return;
+      if (!retried) { retried = true; resume(); } else end('stalled');
+    }, 1000);
+    video.addEventListener('ended', onEnded);
+    resume();
+  });
+  if (how instanceof Error) throw how;
+  if (how === 'stalled') return bySeek();
+  return how;
+}
+
+// 前後の解析結果から、間のコマの点を求める（w = 0 で前、1 で後ろ）。どちらかで見失っていれば null
+function lerpPose(a, b, w) {
+  if (!a || !b) return null;
+  const p = new Float32Array(NPTS * 3);
+  for (let j = 0; j < NPTS; j++) {
+    p[j * 3] = a[j * 3] + (b[j * 3] - a[j * 3]) * w;
+    p[j * 3 + 1] = a[j * 3 + 1] + (b[j * 3 + 1] - a[j * 3 + 1]) * w;
+    p[j * 3 + 2] = Math.min(a[j * 3 + 2], b[j * 3 + 2]);
+  }
+  return p;
+}
+
 async function analyze() {
   const step = 1 / state.fps;
   const n = Math.floor((state.end - state.start) / step + 1e-6) + 1;
+  const times = Array.from({ length: n }, (_, i) => state.start + i * step);
+  // 骨格AIを動かすコマ：毎秒10コマ（0.1秒ごとの時刻を最初に過ぎたコマ）と、最初と最後のコマ
+  const slot = (i) => Math.floor((i * ANALYZE_FPS) / state.fps + 1e-6);
+  const isKey = (i) => i === 0 || i === n - 1 || slot(i) > slot(i - 1);
+  let nKeys = 0;
+  for (let i = 0; i < n; i++) if (isKey(i)) nKeys++;
+
   const bar = $('analyze-bar');
   bar.style.width = '0%';
-  state.frames = [];
+  state.frames = new Array(n);
   state.videoBlob = state.csvBlob = null;
   lastCrop.A = lastCrop.B = null;
   let prevA = needT() ? state.pickPoses[state.teacherIdx] : null;
   let prevB = needB() ? state.pickPoses[state.beginnerIdx] : null;
-  let lostA = 0, lostB = 0, overlaps = 0;
+  // 頭の2点の比率は、最初のコマ（手で直した場合は直した後）から測る
+  state.headK = { A: prevA ? headRatio(prevA) : null, B: prevB ? headRatio(prevB) : null };
+  let lostA = 0, lostB = 0, overlaps = 0, keysDone = 0;
   state.analysisVideo = $('video-kind').value === 'analysis' && state.target === 'both';
   const writer = await createWriter(state.analysisVideo);
   const t0 = performance.now();
   message('analyze-info', '終わるまでこの画面を開いたままにしてください。');
-  for (let i = 0; i < n; i++) {
-    const t = state.start + i * step;
-    await seekTo(video, t);
-    // 最初のコマは、選んだとき（手で直した場合は直した後）の点をそのまま使う
-    const { A, B } = i === 0 ? { A: prevA && prevA.slice(), B: prevB && prevB.slice() } : await trackFrame(prevA, prevB);
-    if (i > 0) {
-      if (A) await addHead(A);
-      if (B) await addHead(B);
+  $('live-wrap').hidden = false;
+
+  let lastKey = null;   // 直前に解析したコマ { i, A, B }
+  const pending = [];   // 次の解析を待っている間のコマ { i, img }
+
+  const emit = async (i, A, B, img, key) => {
+    const frame = { t: times[i], A, B, key, overlap: overlapping(A, B) };
+    if (frame.overlap) overlaps++;
+    state.frames[i] = frame;
+    if (writer) await writer.add(frame, i, n, img);
+  };
+
+  const onFrame = async (i, img) => {
+    if (!isKey(i)) { pending.push({ i, img }); return; }
+    source = img; // 骨格AIは、写し取ったこのコマから切り出す
+    let A, B;
+    if (i === 0) {
+      // 最初のコマは、選んだとき（手で直した場合は直した後）の点をそのまま使う
+      A = prevA && prevA.slice();
+      B = prevB && prevB.slice();
+    } else {
+      ({ A, B } = await trackFrame(prevA, prevB));
+      if (A) estimateHead(A, state.headK.A);
+      if (B) estimateHead(B, state.headK.B);
     }
     if (prevA) { if (A) prevA = A; else lostA++; }
     if (prevB) { if (B) prevB = B; else lostB++; }
-    const frame = { t, A, B, overlap: overlapping(A, B) };
-    if (frame.overlap) overlaps++;
-    state.frames.push(frame);
-    // 同じコマを、そのまま動画に書き込む
-    if (writer) await writer.add(frame, i, n);
-    if (i % 3 === 0 || i === n - 1) {
+    // 間のコマは、前後の解析結果から補間して書き出す
+    for (const q of pending) {
+      const w = (times[q.i] - times[lastKey.i]) / (times[i] - times[lastKey.i]);
+      await emit(q.i, lerpPose(lastKey.A, A, w), lerpPose(lastKey.B, B, w), q.img, false);
+      releaseFrame(q.img);
+    }
+    pending.length = 0;
+    await emit(i, A, B, img, true);
+    lastKey = { i, A, B };
+    keysDone++;
+    if (keysDone % 5 === 0 || i === n - 1) {
       bar.style.width = `${((i + 1) / n) * 100}%`;
       const left = ((performance.now() - t0) / (i + 1)) * (n - i - 1) / 1000;
       message('analyze-info', `${i + 1} / ${n} コマ　あと約${Math.ceil(left)}秒（この画面を開いたままにしてください）`);
       await nextPaint();
     }
+  };
+
+  let how;
+  try {
+    how = await readFrames(times, isKey, onFrame);
+  } finally {
+    source = video;
+    $('live-wrap').hidden = true;
   }
   message('analyze-info', '仕上げています…');
-  state.headCalibrated = { A: calibrateHeads('A'), B: calibrateHeads('B') };
   state.csvText = buildCsv();
   state.csvBlob = new Blob(['﻿' + state.csvText], { type: 'text/csv' });
   if (writer) state.videoBlob = await writer.finish();
   const sec = ((performance.now() - t0) / 1000).toFixed(0);
   const lost = [needT() && lostA ? `先生 ${lostA}` : '', needB() && lostB ? `初心者 ${lostB}` : ''].filter(Boolean).join('・');
-  message('analyze-info', `解析が終わりました（${n}コマ・${sec}秒・${state.delegate}）。`
+  message('analyze-info', `解析が終わりました（${sec}秒・骨格の検出 ${nKeys}コマ・動画 ${n}コマ・${state.delegate}${how === 'seek' ? '・1コマずつ読み込み' : ''}）。`
     + (lost ? `　見失ったコマ：${lost}` : '')
     + (overlaps ? `　2人が重なったコマ：${overlaps}（CSVに印を付けました）` : ''));
   return !writer;
@@ -1348,13 +1460,12 @@ function buildCsv() {
     `# video: ${state.analysisVideo ? 'analysis (deviations drawn in red)' : 'skeleton only'}`,
     `# analyzed_range_s: ${state.start.toFixed(1)}-${state.end.toFixed(1)}`,
     `# output_speed: ${state.speed}`,
-    `# analysis_fps: ${state.fps} / sample_interval_s: 0.1`,
+    `# analysis_fps: ${ANALYZE_FPS} (pose detected 10 times per second) / video_fps: ${state.fps} (frames between detections are interpolated in the video only) / sample_interval_s: 0.1`,
     `# model: MediaPipe Pose Landmarker ${state.model} (${MEDIAPIPE_VERSION}, ${state.delegate})`,
+    '# rows: every row is a detected frame (not interpolated), the one nearest to time_s',
     '# coords: pixels of the source video, origin top-left, y down. *_vis = AI confidence 0-1 (below 0.5 is unreliable)',
     '# angles_deg: knee/elbow = 3-point angle (180 = straight). arm_raise = upper arm from straight down (0 = down, 90 = shoulder height). shoulder_tilt = shoulder line from horizontal',
-    '# head points: chin_vis 1 = MediaPipe Face Landmarker point 152. head_top is always ESTIMATED: with a face, chin + (forehead top = face point 10 - chin) x 1.3',
-    '# head points when the face AI could not find the face: chin and head_top are ESTIMATED from pose eyes and mouth (vis = 0.4), using the face proportions measured on the same person\'s face-found frames (median), or adult averages if fewer than 5 such frames. vis 0 = no estimate (x/y empty)',
-    `# head_estimate_calibrated_from_frames: tracked A ${state.headCalibrated?.A ?? 0}, tracked B ${state.headCalibrated?.B ?? 0}`,
+    '# head points: chin and head_top are ESTIMATED from the pose eyes and mouth (no face AI), using each person\'s head proportions on the first frame (hand-adjusted if moved) or adult averages. vis = lowest confidence of the eyes and mouth. vis 0 = no estimate (x/y empty)',
     '# left/right: the person\'s own left/right as detected by the AI (a mirrored video stays mirrored)',
     '# tracked_id: A = person picked as teacher, B = person picked as beginner. Only the roles in target are written',
     '# overlap: 1 = the two people overlapped in this frame, so the roles may be mixed up or points may be wrong (consider excluding)',
@@ -1375,7 +1486,7 @@ function buildCsv() {
       if (p) {
         for (const n of names) {
           const q = px(p, POINTS[n]);
-          if (POINTS[n] >= 33 && q.v < 0.05) row.push('', '', 0); // 顔が見つからなかった
+          if (POINTS[n] >= 33 && q.v < 0.05) row.push('', '', 0); // 目や口が見えず、頭の点を推定できなかった
           else row.push(r1(q.x), r1(q.y), r2(q.v));
         }
         row.push(...measures(p));

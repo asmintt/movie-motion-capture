@@ -27,7 +27,7 @@
       <input type="file" id="file" accept="video/*">
       動画を選ぶ
     </label>
-    <p class="hint" id="file-info">写真アプリから練習動画を選びます。1分以内がおすすめです。</p>
+    <p class="hint" id="file-info">写真アプリから練習動画を選びます。1分を超える動画は、パソコンのブラウザで解析すると速く終わります。</p>
     <div class="notice">
       <p class="notice-title">正確に解析するために</p>
       <ul>
@@ -35,10 +35,10 @@
         <li><b>2人が重なっていませんか</b>：重なっている間は、点がずれたり、2人を取り違えたりすることがあります</li>
         <li><b>靴は床と違う色ですか</b>：白い床に白い靴だと、靴の先の位置がずれやすくなります</li>
         <li><b>点がずれていたら直せます</b>：人を選んだあと、靴の先・頭頂部・顎先などをドラッグで直してから解析してください</li>
+        <li><b>頭頂部と顎先は、目と口の位置からの推定です</b>：最初のコマで直すと、その位置の比率で最後まで推定します</li>
         <li>結果はAIの推定です。灰色の線や点は自信が低い部分なので、目安として見てください</li>
       </ul>
     </div>
-    <video id="video" playsinline muted preload="auto" hidden></video>
   </section>
 
   <!-- 2. 設定 -->
@@ -102,7 +102,7 @@
         <span>なめらかさ</span>
         <select id="fps">
           <option value="30" selected>毎秒30コマ</option>
-          <option value="15">毎秒15コマ（速く終わる）</option>
+          <option value="15">毎秒15コマ（少し速く終わる）</option>
         </select>
       </label>
     </div>
@@ -126,7 +126,9 @@
   <!-- 4. 解析 -->
   <section class="step" id="step-analyze" data-state="locked">
     <h2><span class="num">4</span>解析する</h2>
-    <p class="hint">骨格の検出と、骨格つき動画・CSVの作成を1回で行います。</p>
+    <p class="hint">骨格の検出と、骨格つき動画・CSVの作成を1回で行います。骨格の検出は毎秒10コマで行い、動画の間のコマは前後から補間します。</p>
+    <!-- 解析用の動画。再生しながらコマを受け取るため、解析中は画面に出しておく -->
+    <div class="preview-wrap live" id="live-wrap" hidden><video id="video" playsinline muted preload="auto"></video></div>
     <div class="progress"><i id="analyze-bar"></i></div>
     <p class="hint" id="analyze-info">終わるまでこの画面を開いたままにしてください。</p>
   </section>
