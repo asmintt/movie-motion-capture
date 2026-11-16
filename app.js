@@ -19,15 +19,14 @@ const VIS_MIN = 0.5;   // これ未満の点は「AIの自信が低い」とし�
 const SPEED_LABEL = { 0.25: '1/4倍速', 0.5: '1/2倍速', 1: '等倍', 2: '2倍速' };
 const TARGET_LABEL = { both: '2人', teacher: '先生のみ', beginner: '初心者のみ' };
 
-// 骨格AIの33点のあとに、頭の2点を足して持つ（どちらもAIの点ではなく、骨格AIの目と口からの推定）
-//   33 顎先
-//   34 頭頂部
+// 骨格AIの33点のあとに、頭頂部の1点を足して持つ（AIの点ではなく、骨格AIの目と口からの推定）
+//   33 頭頂部
 // 比率は、最初のコマ（人を選んだときに手で直した場合は直した後）の位置から測る
-const CHIN = 33, HEAD_TOP = 34, NPTS = 35;
+const HEAD_TOP = 33, NPTS = 34;
 
 // CSVに書き出す点
 const POINTS = {
-  head_top: HEAD_TOP, chin: CHIN,
+  head_top: HEAD_TOP,
   nose: 0, left_ear: 7, right_ear: 8,
   left_shoulder: 11, right_shoulder: 12, left_elbow: 13, right_elbow: 14, left_wrist: 15, right_wrist: 16,
   left_hip: 23, right_hip: 24, left_knee: 25, right_knee: 26, left_ankle: 27, right_ankle: 28,
@@ -221,18 +220,18 @@ async function getLandmarker(model, forceCpu = false) {
   return lm;
 }
 
-// 1人分の点を [x, y, 自信] ×35 の配列にまとめる（x, y は 0〜1）。頭の2点はあとで estimateHead が埋める
+// 1人分の点を [x, y, 自信] ×34 の配列にまとめる（x, y は 0〜1）。頭頂部はあとで estimateHead が埋める
 function pack(landmarks) {
   const a = new Float32Array(NPTS * 3);
   landmarks.forEach((p, i) => { a[i * 3] = p.x; a[i * 3 + 1] = p.y; a[i * 3 + 2] = p.visibility ?? 1; });
   return a;
 }
 
-// ---------- 頭（顎先・頭頂部） ----------
+// ---------- 頭（頭頂部） ----------
 // 顔用AIは使わず、骨格AIの目と口から推定する。目の真ん中 e → 口の真ん中 m を u とし、
-// u とそれに直交する向き n を物差しにして、顎先は m から、頭頂部は e からの位置で表す。
-// 比率は人ごとに、最初のコマの頭の2点から測る（手で直した場合は直した位置）。測れないときは大人の顔の一般的な比率
-const HEAD_RATIO_DEFAULT = { ca: 0.7, cb: 0, ta: -1.65, tb: 0 };
+// u とそれに直交する向き n を物差しにして、頭頂部を e からの位置で表す。
+// 比率は人ごとに、最初のコマの頭頂部から測る（手で直した場合は直した位置）。測れないときは大人の顔の一般的な比率
+const HEAD_RATIO_DEFAULT = { ta: -1.65, tb: 0 };
 
 function faceFrame(p) {
   const P = (i) => px(p, i);
@@ -244,30 +243,24 @@ function faceFrame(p) {
   return { e, m, u, n: { x: -u.y, y: u.x } };
 }
 
-// 頭の2点を推定して p に書き込む。自信は、目と口の4点の自信の一番低い値（目や口が見えないと灰色になる）
+// 頭頂部を推定して p に書き込む。自信は、目と口の4点の自信の一番低い値（目や口が見えないと灰色になる）
 function estimateHead(p, k = HEAD_RATIO_DEFAULT) {
   const f = faceFrame(p);
-  if (!f) { p[CHIN * 3 + 2] = p[HEAD_TOP * 3 + 2] = 0; return p; }
-  const { e, m, u, n } = f;
-  p[CHIN * 3] = (m.x + u.x * k.ca + n.x * k.cb) / state.vw;
-  p[CHIN * 3 + 1] = (m.y + u.y * k.ca + n.y * k.cb) / state.vh;
+  if (!f) { p[HEAD_TOP * 3 + 2] = 0; return p; }
+  const { e, u, n } = f;
   p[HEAD_TOP * 3] = (e.x + u.x * k.ta + n.x * k.tb) / state.vw;
   p[HEAD_TOP * 3 + 1] = (e.y + u.y * k.ta + n.y * k.tb) / state.vh;
-  p[CHIN * 3 + 2] = p[HEAD_TOP * 3 + 2] = Math.min(p[2 * 3 + 2], p[5 * 3 + 2], p[9 * 3 + 2], p[10 * 3 + 2]);
+  p[HEAD_TOP * 3 + 2] = Math.min(p[2 * 3 + 2], p[5 * 3 + 2], p[9 * 3 + 2], p[10 * 3 + 2]);
   return p;
 }
 
-// 最初のコマの頭の2点から、その人の比率を測る（estimateHead の逆算）
+// 最初のコマの頭頂部から、その人の比率を測る（estimateHead の逆算）
 function headRatio(p) {
   const f = p && faceFrame(p);
-  if (!f || p[CHIN * 3 + 2] < 0.05 || p[HEAD_TOP * 3 + 2] < 0.05) return HEAD_RATIO_DEFAULT;
+  if (!f || p[HEAD_TOP * 3 + 2] < 0.05) return HEAD_RATIO_DEFAULT;
   const L = f.u.x ** 2 + f.u.y ** 2;
-  const c = { x: p[CHIN * 3] * state.vw - f.m.x, y: p[CHIN * 3 + 1] * state.vh - f.m.y };
   const t = { x: p[HEAD_TOP * 3] * state.vw - f.e.x, y: p[HEAD_TOP * 3 + 1] * state.vh - f.e.y };
-  return {
-    ca: (c.x * f.u.x + c.y * f.u.y) / L, cb: (c.x * f.n.x + c.y * f.n.y) / L,
-    ta: (t.x * f.u.x + t.y * f.u.y) / L, tb: (t.x * f.n.x + t.y * f.n.y) / L,
-  };
+  return { ta: (t.x * f.u.x + t.y * f.u.y) / L, tb: (t.x * f.n.x + t.y * f.n.y) / L };
 }
 
 async function detect(src) {
@@ -431,8 +424,8 @@ function drawSkeleton(ctx, p, color) {
     ctx.lineTo(p[j * 3] * W, p[j * 3 + 1] * H);
     ctx.stroke();
   }
-  // 頭：頭頂部 → 顎先 → 両肩の真ん中 の線（頭と首の傾きが分かる）
-  const hv = p[HEAD_TOP * 3 + 2], cv = p[CHIN * 3 + 2];
+  // 頭：頭頂部 → 両肩の真ん中 の線（頭と首の傾きが分かる）
+  const hv = p[HEAD_TOP * 3 + 2];
   const neck = { x: (p[33] + p[36]) / 2, y: (p[34] + p[37]) / 2, v: Math.min(p[35], p[38]) }; // 11・12番（両肩）の真ん中
   ctx.lineWidth = lw;
   const segment = (a, b, va, vb) => {
@@ -443,9 +436,8 @@ function drawSkeleton(ctx, p, color) {
     ctx.lineTo(b.x * W, b.y * H);
     ctx.stroke();
   };
-  const top = { x: p[HEAD_TOP * 3], y: p[HEAD_TOP * 3 + 1] }, chin = { x: p[CHIN * 3], y: p[CHIN * 3 + 1] };
-  segment(top, chin, hv, cv);
-  segment(chin, neck, cv, neck.v);
+  const top = { x: p[HEAD_TOP * 3], y: p[HEAD_TOP * 3 + 1] };
+  segment(top, neck, hv, neck.v);
   // 頭頂部からまっすぐ下ろした点線（体の軸がどちらへ傾いているかの目安）。足元の高さまで引く
   if (hv >= 0.05) {
     let foot = 0;
@@ -462,8 +454,8 @@ function drawSkeleton(ctx, p, color) {
       ctx.restore();
     }
   }
-  // マーク（関節・頭頂部・鼻・顎先の丸）は線と同じ色で、白いふちを付ける。自信が低い点は灰色。線の上に重ねて描く
-  const dots = [...JOINTS.map((i) => [i, 1.25]), [0, 1.4], [CHIN, 1.25], [HEAD_TOP, 1.25]];
+  // マーク（関節・頭頂部・鼻の丸）は線と同じ色で、白いふちを付ける。自信が低い点は灰色。線の上に重ねて描く
+  const dots = [...JOINTS.map((i) => [i, 1.25]), [0, 1.4], [HEAD_TOP, 1.25]];
   ctx.strokeStyle = COLOR.mark;
   ctx.lineWidth = Math.max(1, lw * 0.5);
   // 腰の中心（左右の腰の真ん中）：オレンジの丸
@@ -563,7 +555,7 @@ function pickPrompt() {
 }
 
 // 点を直すときにつかむ点（体の関節と鼻）
-const HANDLES = [HEAD_TOP, 0, CHIN, ...JOINTS];
+const HANDLES = [HEAD_TOP, 0, ...JOINTS];
 
 function drawPick() {
   const ctx = pickCanvas.getContext('2d');
@@ -584,7 +576,7 @@ function drawPick() {
       ctx.strokeStyle = '#FFFFFF';
       ctx.fillStyle = color;
       for (const j of HANDLES) {
-        if (p[j * 3 + 2] < 0.05) continue; // 目や口が見えず推定できなかったときの顎先・頭頂部
+        if (p[j * 3 + 2] < 0.05) continue; // 目や口が見えず推定できなかったときの頭頂部
         ctx.beginPath();
         ctx.arc(p[j * 3] * W, p[j * 3 + 1] * H, r, 0, Math.PI * 2);
         ctx.fill();
@@ -778,7 +770,7 @@ pickCanvas.addEventListener('click', async (e) => {
   if (needT() && state.teacherIdx === null) state.teacherIdx = best;
   else state.beginnerIdx = best;
   if (pickReady()) {
-    // 人が決まったら、顎先・頭頂部を目と口から推定して、直せる点に加える。
+    // 人が決まったら、頭頂部を目と口から推定して、直せる点に加える。
     // ここで直した位置の比率を、解析中のすべてのコマで使う
     for (const i of pickedIdx()) {
       estimateHead(state.pickPoses[i]);
@@ -1048,7 +1040,7 @@ function createJudge(VW, VH, L, ctx, encode) {
   function angleLabels(p, v) {
     if (!p || !v) return;
     const dark = 'rgba(12,14,18,0.85)';
-    if (v.tilt !== null && p[CHIN * 3 + 2] >= 0.05) { const c = pt(p, CHIN); label(`肩 ${Math.round(v.tilt)}°`, c.x - 20 * u, c.y + 2 * u, J_COLOR.white, dark); }
+    if (v.tilt !== null) { const a = pt(p, 11), b = pt(p, 12); label(`肩 ${Math.round(v.tilt)}°`, (a.x + b.x) / 2 - 20 * u, (a.y + b.y) / 2 + 6 * u, J_COLOR.white, dark); }
     for (const [k, e, left] of [['L', 13, true], ['R', 14, false]]) {
       if (v['armRaise' + k] === null) continue;
       const E = pt(p, e);
@@ -1465,7 +1457,7 @@ function buildCsv() {
     '# rows: every row is a detected frame (not interpolated), the one nearest to time_s',
     '# coords: pixels of the source video, origin top-left, y down. *_vis = AI confidence 0-1 (below 0.5 is unreliable)',
     '# angles_deg: knee/elbow = 3-point angle (180 = straight). arm_raise = upper arm from straight down (0 = down, 90 = shoulder height). shoulder_tilt = shoulder line from horizontal',
-    '# head points: chin and head_top are ESTIMATED from the pose eyes and mouth (no face AI), using each person\'s head proportions on the first frame (hand-adjusted if moved) or adult averages. vis = lowest confidence of the eyes and mouth. vis 0 = no estimate (x/y empty)',
+    '# head_top: ESTIMATED from the pose eyes and mouth (no face AI), using each person\'s head proportion on the first frame (hand-adjusted if moved) or adult averages. vis = lowest confidence of the eyes and mouth. vis 0 = no estimate (x/y empty). The chin columns were removed in v3',
     '# left/right: the person\'s own left/right as detected by the AI (a mirrored video stays mirrored)',
     '# tracked_id: A = person picked as teacher, B = person picked as beginner. Only the roles in target are written',
     '# overlap: 1 = the two people overlapped in this frame, so the roles may be mixed up or points may be wrong (consider excluding)',
