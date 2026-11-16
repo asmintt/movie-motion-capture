@@ -14,7 +14,7 @@ const MEDIAPIPE_VERSION = 'tasks-vision 0.10.14';
 const $ = (id) => document.getElementById(id);
 
 // 動画に焼き込む色（画面のテーマに関係なく固定）
-const COLOR = { teacher: '#3D7BFF', beginner: '#FF7A1A', hip: '#FFA21F', mark: '#FFFFFF', low: 'rgba(150,158,167,0.8)', other: 'rgba(255,255,255,0.85)' };
+const COLOR = { teacher: '#3D7BFF', beginner: '#FF7A1A', mark: '#FFFFFF', low: 'rgba(150,158,167,0.8)', other: 'rgba(255,255,255,0.85)' };
 const VIS_MIN = 0.5;   // これ未満の点は「AIの自信が低い」として灰色で描く
 const SPEED_LABEL = { 0.25: '1/4倍速', 0.5: '1/2倍速', 1: '等倍', 2: '2倍速' };
 const TARGET_LABEL = { both: '2人', teacher: '先生のみ', beginner: '初心者のみ' };
@@ -458,15 +458,6 @@ function drawSkeleton(ctx, p, color) {
   const dots = [...JOINTS.map((i) => [i, 1.25]), [HEAD_TOP, 1.25]];
   ctx.strokeStyle = COLOR.mark;
   ctx.lineWidth = Math.max(1, lw * 0.5);
-  // 腰の中心（左右の腰の真ん中）：オレンジの丸
-  const hipV = Math.min(p[23 * 3 + 2], p[24 * 3 + 2]);
-  if (hipV >= 0.05) {
-    ctx.fillStyle = hipV >= VIS_MIN ? COLOR.hip : COLOR.low;
-    ctx.beginPath();
-    ctx.arc(((p[69] + p[72]) / 2) * W, ((p[70] + p[73]) / 2) * H, lw * 2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-  }
   for (const [i, r] of dots) {
     const v = p[i * 3 + 2];
     if (v < 0.05) continue;
