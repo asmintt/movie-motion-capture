@@ -27,7 +27,7 @@ const HEAD_TOP = 33, NPTS = 34;
 // CSVに書き出す点
 const POINTS = {
   head_top: HEAD_TOP,
-  nose: 0, left_ear: 7, right_ear: 8,
+  left_ear: 7, right_ear: 8,
   left_shoulder: 11, right_shoulder: 12, left_elbow: 13, right_elbow: 14, left_wrist: 15, right_wrist: 16,
   left_hip: 23, right_hip: 24, left_knee: 25, right_knee: 26, left_ankle: 27, right_ankle: 28,
   left_heel: 29, right_heel: 30, left_foot_index: 31, right_foot_index: 32,
@@ -454,8 +454,8 @@ function drawSkeleton(ctx, p, color) {
       ctx.restore();
     }
   }
-  // マーク（関節・頭頂部・鼻の丸）は線と同じ色で、白いふちを付ける。自信が低い点は灰色。線の上に重ねて描く
-  const dots = [...JOINTS.map((i) => [i, 1.25]), [0, 1.4], [HEAD_TOP, 1.25]];
+  // マーク（関節・頭頂部の丸）は線と同じ色で、白いふちを付ける。自信が低い点は灰色。線の上に重ねて描く
+  const dots = [...JOINTS.map((i) => [i, 1.25]), [HEAD_TOP, 1.25]];
   ctx.strokeStyle = COLOR.mark;
   ctx.lineWidth = Math.max(1, lw * 0.5);
   // 腰の中心（左右の腰の真ん中）：オレンジの丸
@@ -554,8 +554,8 @@ function pickPrompt() {
   pickCanvas.classList.toggle('editing', ready);
 }
 
-// 点を直すときにつかむ点（体の関節と鼻）
-const HANDLES = [HEAD_TOP, 0, ...JOINTS];
+// 点を直すときにつかむ点（頭頂部と体の関節）
+const HANDLES = [HEAD_TOP, ...JOINTS];
 
 function drawPick() {
   const ctx = pickCanvas.getContext('2d');
