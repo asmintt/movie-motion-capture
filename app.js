@@ -1276,7 +1276,7 @@ function showResult(noVideo) {
       : '動画を書き出せませんでした。CSVは保存できます。', true);
   }
   message('claude-info', ANALYSIS_URL
-    ? '骨格データをコピーして、分析用のページ（Artifact）を開きます。開いたら貼り付けて「分析する」を押してください。'
+    ? '先に「動画を保存」してから押してください。骨格データをコピーして分析ページを開きます。開いたら、保存した動画を選び、データを貼り付けて「分析する」を押します。'
     : '分析用のページ（Artifact）のリンクがまだ入っていないので、今は骨格データのコピーだけ行います。');
   $('step-export').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
@@ -1288,7 +1288,7 @@ $('to-claude').addEventListener('click', async () => {
   if (ANALYSIS_URL) window.open(ANALYSIS_URL, '_blank');
   try {
     await copy;
-    message('claude-info', ANALYSIS_URL ? '骨格データをコピーしました。開いたページに貼り付けてください。' : '骨格データをコピーしました。');
+    message('claude-info', ANALYSIS_URL ? '骨格データをコピーしました。開いたページで動画を選び、データを貼り付けてください。' : '骨格データをコピーしました。');
   } catch {
     message('claude-info', 'コピーできませんでした。「CSVを保存」で保存してから渡してください。', true);
   }
@@ -1347,6 +1347,7 @@ function buildCsv() {
     `# target: ${state.target} (${TARGET_LABEL[state.target]})`,
     `# video: ${state.analysisVideo ? 'analysis (deviations drawn in red)' : 'skeleton only'}`,
     `# analyzed_range_s: ${state.start.toFixed(1)}-${state.end.toFixed(1)}`,
+    `# output_speed: ${state.speed}`,
     `# analysis_fps: ${state.fps} / sample_interval_s: 0.1`,
     `# model: MediaPipe Pose Landmarker ${state.model} (${MEDIAPIPE_VERSION}, ${state.delegate})`,
     '# coords: pixels of the source video, origin top-left, y down. *_vis = AI confidence 0-1 (below 0.5 is unreliable)',
