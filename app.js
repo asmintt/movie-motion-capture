@@ -154,13 +154,16 @@ async function handleFile(file) {
 $('file').addEventListener('change', (e) => handleFile(e.target.files[0]));
 $('start-here').addEventListener('click', () => { $('start').value = preview.currentTime.toFixed(1); invalidate(); });
 $('end-here').addEventListener('click', () => { $('end').value = preview.currentTime.toFixed(1); invalidate(); });
-for (const id of ['start', 'end', 'speed', 'model', 'fps', 'target']) $(id).addEventListener('change', invalidate);
-// 分析つき動画は2人のときだけ選べる
+for (const id of ['start', 'end', 'speed', 'model', 'fps', 'target', 'follow', 'lag']) $(id).addEventListener('change', invalidate);
+// 分析つき動画と後追いは2人のときだけ選べる
 function syncVideoKind() {
   const both = $('target').value === 'both';
   $('video-kind').querySelector('option[value="analysis"]').disabled = !both;
   if (!both) $('video-kind').value = 'skeleton';
+  $('follow-field').hidden = !both;
+  $('lag-field').hidden = !both || $('follow').value !== 'follow';
 }
+$('follow').addEventListener('change', syncVideoKind);
 $('target').addEventListener('change', syncVideoKind);
 syncVideoKind();
 // マークの大きさは描き方だけなので、解析はやり直さずに描き直す
@@ -189,6 +192,9 @@ function readSettings() {
   state.model = $('model').value;
   state.fps = Number($('fps').value);
   state.target = $('target').value;
+  // 後追い：初心者は先生の lag 秒後に同じ動きをする。比べるときは先生の lag 秒前の動きと比べる
+  const lag = Number($('lag').value);
+  state.followLag = state.target === 'both' && $('follow').value === 'follow' ? (Number.isFinite(lag) && lag > 0 ? Math.min(5, Math.round(lag * 10) / 10) : 1) : 0;
 }
 
 // ---------- 骨格検出（MediaPipe Pose） ----------
@@ -937,6 +943,10 @@ function createJudge(VW, VH, L, ctx, encode) {
   const ankles = { A: [], B: [] };
   const floor = { A: null, B: null };
   let total = 1;
+  // 後追い：先生は lagN コマ前の動きと比べる（書き出しの1コマ = 元の動画の 1/fps 秒）
+  const lagN = Math.round((state.followLag || 0) * state.fps);
+  const histT = [];                        // コマごとの先生の判定用の値
+  const histOver = [];
 
   // 床の高さ：足首が床に着いているときの高さ（これまでの足首の位置の95%点）
   const updateFloor = (key, p, i) => {
@@ -952,11 +962,16 @@ function createJudge(VW, VH, L, ctx, encode) {
     total = n;
     updateFloor('A', frame.A, i);
     updateFloor('B', frame.B, i);
-    const tv = judgeValues(frame.A, floor.A), bv = judgeValues(frame.B, floor.B);
+    const tvNow = judgeValues(frame.A, floor.A), bv = judgeValues(frame.B, floor.B);
+    histT[i] = tvNow; histOver[i] = !!frame.overlap;
+    // 比べる先生：同時なら今のコマ、後追いなら lagN コマ前（まだなければ比べない）
+    const j = i - lagN;
+    const tv = lagN ? (j >= 0 ? histT[j] ?? null : null) : tvNow;
+    const over = frame.overlap || (lagN && j >= 0 && histOver[j]);
     for (const id of J_IDS) {
       const a = tv?.[id] ?? null, b = bv?.[id] ?? null;
       let r = null;
-      if (a !== null && b !== null && !frame.overlap) {
+      if (a !== null && b !== null && !over) {
         const d = J_DIR[id] === 'up' ? b - a : J_DIR[id] === 'down' ? a - b : Math.abs(b - a);
         r = d >= JUDGE[J_TH[id]];
       }
@@ -965,7 +980,7 @@ function createJudge(VW, VH, L, ctx, encode) {
     const c = document.createElement('canvas');
     c.width = VW; c.height = VH;
     drawScene(c.getContext('2d'), frame, false, img);
-    scene.push({ frame, i, c, tv, bv });
+    scene.push({ frame, i, c, tv, tvNow, bv, over });
     while (scene.length > look) await finalize(scene.shift());
   }
 
@@ -983,10 +998,10 @@ function createJudge(VW, VH, L, ctx, encode) {
   }
 
   async function finalize(s) {
-    const { frame, i, tv, bv } = s;
+    const { frame, i, tv, tvNow, bv } = s;
     for (const id of J_IDS) dev[id][i] = isDev(id, i);
     for (const r of J_ROWS) {
-      for (const [k, v] of [['t', tv], ['b', bv]]) {
+      for (const [k, v] of [['t', tvNow], ['b', bv]]) {
         const x = frame.overlap ? null : judgeShow(v, r.key);
         if (x !== null) maxV[k][r.key] = Math.max(maxV[k][r.key] ?? 0, x);
       }
@@ -995,9 +1010,9 @@ function createJudge(VW, VH, L, ctx, encode) {
     ctx.fillStyle = J_COLOR.bg;
     ctx.fillRect(0, 0, W, ctx.canvas.height);
     ctx.drawImage(s.c, 0, L.head);
-    const msgs = drawDeviations(ctx, frame, tv, bv, i);
-    drawHead(ctx, frame, msgs, bv);
-    drawPanel(ctx, frame, tv, bv, i);
+    const msgs = drawDeviations(ctx, frame, tv, tvNow, bv, i);
+    drawHead(ctx, frame, msgs, s);
+    drawPanel(ctx, frame, tv, bv, i, s);
     await encode(i);
   }
 
@@ -1040,11 +1055,12 @@ function createJudge(VW, VH, L, ctx, encode) {
     if (v.knee !== null) { const K = pt(p, v.kneeSide === 'L' ? 25 : 26); label(`膝 ${Math.round(v.knee)}°`, K.x + 8 * u, K.y - 8 * u, J_COLOR.white, dark); }
   }
 
-  function drawDeviations(c, frame, tv, bv, i) {
+  // tv = 比べる先生の値（後追いなら少し前の動き）、tvNow = 画面の先生の今の値
+  function drawDeviations(c, frame, tv, tvNow, bv, i) {
     const T = frame.A, B = frame.B, msgs = [];
-    if (!frame.overlap) { angleLabels(T, tv); angleLabels(B, bv); }
-    if (T && tv && tv.foot !== null && tv.foot >= 0.15 && !frame.overlap) {
-      const idx = tv.footSide === 'L' ? 27 : 28;
+    if (!frame.overlap) { angleLabels(T, tvNow); angleLabels(B, bv); }
+    if (T && tvNow && tvNow.foot !== null && tvNow.foot >= 0.15 && !frame.overlap) {
+      const idx = tvNow.footSide === 'L' ? 27 : 28;
       ring(T, idx, J_COLOR.green);
       const A = pt(T, idx); label('足上げ', A.x + 12 * u, A.y - 8 * u, J_COLOR.green, 'rgba(12,14,18,0.85)');
     }
@@ -1054,7 +1070,7 @@ function createJudge(VW, VH, L, ctx, encode) {
       if (dev['elbowDrop' + k][i]) notes.push('肘が落ちている');
       if (dev['armRaise' + k][i]) notes.push(bv['armRaise' + k] > (tv?.['armRaise' + k] ?? 0) ? '肘が上がりすぎ' : '肘が低い');
       if (!notes.length) continue;
-      line(B, s, e); line(B, e, w); ring(B, e, J_COLOR.red); ring(T, e, J_COLOR.white, 9);
+      line(B, s, e); line(B, e, w); ring(B, e, J_COLOR.red); if (!lagN) ring(T, e, J_COLOR.white, 9);
       const E = pt(B, e);
       notes.forEach((t, j) => label(t, E.x - 50 * u, E.y + (14 + j * 21) * u, J_COLOR.white, J_COLOR.red));
       msgs.push(...notes);
@@ -1080,19 +1096,20 @@ function createJudge(VW, VH, L, ctx, encode) {
     return [...new Set(msgs)];
   }
 
-  function drawHead(c, frame, msgs, bv) {
+  function drawHead(c, frame, msgs, s) {
     c.fillStyle = J_COLOR.bg;
     c.fillRect(0, 0, VW, L.head);
     c.textBaseline = 'top';
     c.font = font(15); c.fillStyle = J_COLOR.muted;
-    c.fillText(`元の動画 ${frame.t.toFixed(1)}秒　${SPEED_LABEL[state.speed] ?? `${state.speed}倍速`}`, 14 * u, 6 * u);
+    c.fillText(`元の動画 ${frame.t.toFixed(1)}秒　${SPEED_LABEL[state.speed] ?? `${state.speed}倍速`}${lagN ? `　後追い：先生の${state.followLag}秒前の動きと比べています` : ''}`, 14 * u, 6 * u);
     c.font = font(24);
     if (msgs.length) { c.fillStyle = J_COLOR.red; c.fillText('赤：先生とずれている部分 → ' + msgs.join('・'), 14 * u, 30 * u); }
-    else if (frame.overlap || !frame.A || !frame.B) { c.fillStyle = J_COLOR.yellow; c.fillText('2人が重なっているか見失ったコマ（比べていません）', 14 * u, 30 * u); }
+    else if (lagN && s.i < lagN) { c.fillStyle = J_COLOR.yellow; c.fillText(`後追いの始め（先生の${state.followLag}秒前の動きがまだないので比べていません）`, 14 * u, 30 * u); }
+    else if (s.over || !s.tv || !s.bv) { c.fillStyle = J_COLOR.yellow; c.fillText('2人が重なっているか見失ったコマ（比べていません）', 14 * u, 30 * u); }
     else { c.fillStyle = J_COLOR.white; c.fillText('先生とのずれは出ていません', 14 * u, 30 * u); }
   }
 
-  function drawPanel(c, frame, tv, bv, i) {
+  function drawPanel(c, frame, tv, bv, i, s0) {
     const y0 = L.head + VH, W = VW;
     c.fillStyle = J_COLOR.panel;
     c.fillRect(0, y0, W, L.panel);
@@ -1106,10 +1123,10 @@ function createJudge(VW, VH, L, ctx, encode) {
       if (on) { c.fillStyle = J_COLOR.redbg; c.fillRect(0, y, W, rh - 4 * u); }
       c.font = font(20); c.fillStyle = on ? J_COLOR.red : J_COLOR.white;
       c.fillText(r.name, 14 * u, y + 14 * u);
-      [['t', tv, COLOR.teacher, '先生 '], ['b', bv, COLOR.beginner, '初心者 ']].forEach(([k, v, col, who], j) => {
+      [['t', tv, COLOR.teacher, lagN ? `先生(${state.followLag}秒前) ` : '先生 '], ['b', bv, COLOR.beginner, '初心者 ']].forEach(([k, v, col, who], j) => {
         const by = y + (6 + j * 24) * u, bh = 16 * u;
         c.fillStyle = J_COLOR.track; c.fillRect(bx0, by, bx1 - bx0, bh);
-        const x = frame.overlap ? null : judgeShow(v, r.key);
+        const x = (k === 't' ? s0.over : frame.overlap) ? null : judgeShow(v, r.key);
         if (x !== null) { c.fillStyle = col; c.fillRect(bx0, by, (bx1 - bx0) * Math.max(0, Math.min(1, x / r.scale)), bh); }
         const mx = maxV[k][r.key];
         if (mx !== undefined) { c.fillStyle = J_COLOR.white; c.fillRect(bx0 + (bx1 - bx0) * Math.min(1, mx / r.scale) - u, by - 2 * u, 2 * u, bh + 4 * u); }
@@ -1443,6 +1460,7 @@ function buildCsv() {
     `# video: ${state.analysisVideo ? 'analysis (deviations drawn in red)' : 'skeleton only'}`,
     `# analyzed_range_s: ${state.start.toFixed(1)}-${state.end.toFixed(1)}`,
     `# output_speed: ${state.speed}`,
+    ...(state.followLag ? [`# follow_lag_s: ${state.followLag} (beginner follows the teacher this many seconds later; the analysis video compares the beginner with the teacher's motion this many seconds earlier)`] : []),
     `# analysis_fps: ${ANALYZE_FPS} (pose detected 10 times per second) / video_fps: ${state.fps} (frames between detections are interpolated in the video only) / sample_interval_s: 0.1`,
     `# model: MediaPipe Pose Landmarker ${state.model} (${MEDIAPIPE_VERSION}, ${state.delegate})`,
     '# rows: every row is a detected frame (not interpolated), the one nearest to time_s',
