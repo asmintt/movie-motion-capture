@@ -153,8 +153,10 @@
     <div class="actions">
       <button type="button" class="btn" id="save-video" disabled>動画を保存</button>
       <button type="button" class="btn" id="save-csv" disabled>CSVを保存</button>
+      <button type="button" class="btn" id="copy-csv" disabled>CSVをコピー</button>
     </div>
-    <p class="hint">手元に残したいときだけ保存します。動画は写真アプリへ、CSVは「ファイル」アプリへ。</p>
+    <p class="hint" id="copy-info" hidden></p>
+    <p class="hint">手元に残したいときだけ保存します。動画は写真アプリへ、CSVは「ファイル」アプリへ。「CSVをコピー」は、ファイルにせずにメモやチャットへ貼り付けたいときに使います。</p>
     <h2 class="sub-step"><span class="num">6</span>Claudeで分析する</h2>
     <button type="button" class="btn primary" id="to-claude" disabled>Claudeで分析</button>
     <p class="hint" id="claude-info"></p>

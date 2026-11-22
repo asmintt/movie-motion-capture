@@ -790,7 +790,8 @@ $('to-analyze').addEventListener('click', async () => {
   setStep('step-pick', 'done');
   setStep('step-analyze', 'active');
   lockFrom('step-export');
-  $('save-video').disabled = $('save-csv').disabled = $('to-claude').disabled = true;
+  $('save-video').disabled = $('save-csv').disabled = $('copy-csv').disabled = $('to-claude').disabled = true;
+  $('copy-info').hidden = true;
   $('result-wrap').hidden = true;
   state.busy = true;
   await keepAwake(true);
@@ -1376,6 +1377,7 @@ async function analyze() {
 function showResult(noVideo) {
   setStep('step-export', 'active');
   $('save-csv').disabled = false;
+  $('copy-csv').disabled = false;
   $('to-claude').disabled = false;
   if (state.videoBlob) {
     $('result').src = URL.createObjectURL(state.videoBlob);
@@ -1526,6 +1528,27 @@ async function saveBlob(blob, filename) {
 
 $('save-video').addEventListener('click', () => state.videoBlob && saveBlob(state.videoBlob, `${baseName()}_MediaPipePose${state.analysisVideo ? '_分析' : ''}.mp4`));
 $('save-csv').addEventListener('click', () => state.csvBlob && saveBlob(state.csvBlob, `${baseName()}_MediaPipePose.csv`));
+// CSVをクリップボードへコピー。使えない端末では、選択してコピーする昔のやり方を試す
+$('copy-csv').addEventListener('click', async () => {
+  if (!state.csvText) return;
+  const info = $('copy-info');
+  info.hidden = false;
+  let ok = false;
+  try { await navigator.clipboard.writeText(state.csvText); ok = true; } catch { /* 次を試す */ }
+  if (!ok) {
+    const ta = document.createElement('textarea');
+    ta.value = state.csvText;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;font-size:16px';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+    ta.remove();
+  }
+  const rows = state.csvText.split('\n').filter((l) => l && !l.startsWith('#')).length - 1;
+  message('copy-info', ok ? `CSVをコピーしました（${rows}行）。貼り付けたい場所で「ペースト」してください。` : 'コピーできませんでした。「CSVを保存」で保存してください。', !ok);
+});
 
 // 動作確認用：?src=動画のURL で動画を読み込む
 const testSrc = new URLSearchParams(location.search).get('src');
