@@ -115,6 +115,26 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 #pick-canvas.editing { cursor: grab; touch-action: none; } /* 点をドラッグする間、画面がスクロールしないようにする */
 #pick-canvas { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
 
+/* AI分析の分析先リスト */
+.ai-links { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px 10px; margin: 0; min-width: 0; }
+.ai-links legend { font-size: 14px; color: var(--muted); padding: 0 4px; }
+.ai-item { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+.ai-item:first-child { border-top: none; }
+.ai-item label { flex: 1; display: flex; align-items: flex-start; gap: 10px; min-width: 0; cursor: pointer; }
+.ai-item input[type="radio"] { width: 22px; height: 22px; margin: 2px 0 0; flex: none; accent-color: var(--ink); }
+.ai-item .ai-text { min-width: 0; }
+.ai-item .ai-name { font-weight: 700; display: block; }
+.ai-item .ai-url { font-size: 12px; color: var(--muted); display: block; overflow-wrap: anywhere; }
+.ai-item .btn.small { min-height: 36px; padding: 4px 10px; }
+.ai-add { font-size: 14px; }
+.ai-add summary { cursor: pointer; color: var(--ink); font-weight: 700; min-height: 32px; }
+.ai-add[open] { display: grid; gap: 10px; }
+input[type="text"], input[type="url"] {
+  font: inherit; font-size: 16px; color: var(--ink);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+  min-height: 44px; padding: 6px 10px; width: 100%; min-width: 0;
+}
+
 /* 長押しで出る拡大鏡。指で隠れないよう、指の少し上に出す */
 #loupe {
   position: fixed;

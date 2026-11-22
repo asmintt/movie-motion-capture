@@ -7,10 +7,12 @@ import { Muxer, ArrayBufferTarget } from './lib/mp4-muxer.mjs';
 const APP_VERSION = 'v3';
 // 骨格AIを動かすのは毎秒10コマ。書き出す動画の間のコマは、前後の結果から補間する
 const ANALYZE_FPS = 10;
-// 「Claudeで分析」で開く、Claudeのプロジェクト「ダンス練習分析」のURL（空のあいだはコピーだけ行う）
-// プロジェクトの「指示」欄の文が、そこで始めたチャットに効く
-const ANALYSIS_URL = 'https://claude.ai/cowork/project/01a1ba4c-287f-7339-9813-4383ee2d5fb7';
-// 以前使っていた分析ページ（Artifact）：https://claude.ai/artifact/M5aJy3Tk7ZBjCZ2r7NHmX9
+// 「AI分析」の分析先。はじめから入っているもの（利用者が追加・削除でき、端末に保存する）
+const DEFAULT_AI_LINKS = [
+  { name: 'プロジェクト「ダンス練習分析」', url: 'https://claude.ai/cowork/project/01a1ba4c-287f-7339-9813-4383ee2d5fb7' },
+  { name: '分析ページ「ダンス練習分析」（Artifact）', url: 'https://claude.ai/artifact/M5aJy3Tk7ZBjCZ2r7NHmX9' },
+];
+const AI_KEY = 'mmc.aiLinks.v1', AI_SEL_KEY = 'mmc.aiSel.v1';
 const MEDIAPIPE_VERSION = 'tasks-vision 0.10.14';
 
 const $ = (id) => document.getElementById(id);
@@ -1396,24 +1398,81 @@ function showResult(noVideo) {
       ? 'この端末では動画を書き出せませんでした（iPhoneはiOS 16.4以降のSafariが必要です）。CSVは保存できます。'
       : '動画を書き出せませんでした。CSVは保存できます。', true);
   }
-  message('claude-info', ANALYSIS_URL
-    ? '先に「動画を保存」してから押してください。骨格データをコピーして、Claudeのプロジェクト「ダンス練習分析」を開きます。開いたら新しいチャットにデータを貼り付け、保存した動画を添えて、見てほしいことを書いて送ります。'
-    : '分析先のリンクがまだ入っていないので、今は骨格データのコピーだけ行います。');
+  message('claude-info', '先に「動画を保存」してから押してください。開いた先に骨格データを貼り付け、保存した動画を添えて使います。');
   $('step-export').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+// ---- AI分析の分析先（端末に保存。保存できない端末では、はじめの2つだけ使う） ----
+const ai = { links: [], sel: 0 };
+function aiLoad() {
+  try { const v = JSON.parse(localStorage.getItem(AI_KEY)); if (Array.isArray(v) && v.length) ai.links = v.filter((l) => l && l.url); } catch { /* 保存なし */ }
+  if (!ai.links.length) ai.links = DEFAULT_AI_LINKS.map((l) => ({ ...l }));
+  try { ai.sel = Number(localStorage.getItem(AI_SEL_KEY)) || 0; } catch { ai.sel = 0; }
+  if (!(ai.sel >= 0 && ai.sel < ai.links.length)) ai.sel = 0;
+}
+function aiSave() {
+  try { localStorage.setItem(AI_KEY, JSON.stringify(ai.links)); localStorage.setItem(AI_SEL_KEY, String(ai.sel)); } catch { /* 保存できない端末 */ }
+}
+const circled = (n) => (n < 20 ? String.fromCharCode(0x2460 + n) : `${n + 1}.`);
+function aiRender() {
+  const list = $('ai-list');
+  list.textContent = '';
+  ai.links.forEach((l, n) => {
+    const row = document.createElement('div');
+    row.className = 'ai-item';
+    const lab = document.createElement('label');
+    const r = document.createElement('input');
+    r.type = 'radio'; r.name = 'ai-sel'; r.checked = n === ai.sel;
+    r.addEventListener('change', () => { ai.sel = n; aiSave(); });
+    const txt = document.createElement('span');
+    txt.className = 'ai-text';
+    const nm = document.createElement('span'); nm.className = 'ai-name'; nm.textContent = `${circled(n)} ${l.name || 'リンク'}`;
+    const u = document.createElement('span'); u.className = 'ai-url'; u.textContent = l.url;
+    txt.append(nm, u); lab.append(r, txt);
+    const del = document.createElement('button');
+    del.type = 'button'; del.className = 'btn small'; del.textContent = '削除';
+    del.setAttribute('aria-label', `${l.name || 'リンク'}を削除`);
+    del.disabled = ai.links.length <= 1; // 1つは残す
+    del.addEventListener('click', () => {
+      if (!confirm(`「${l.name || l.url}」を分析先から削除しますか？`)) return;
+      ai.links.splice(n, 1);
+      if (ai.sel >= ai.links.length) ai.sel = ai.links.length - 1; else if (ai.sel > n) ai.sel--;
+      aiSave(); aiRender();
+    });
+    row.append(lab, del);
+    list.append(row);
+  });
+}
+$('ai-add-btn').addEventListener('click', () => {
+  const name = $('ai-name').value.trim();
+  const url = $('ai-url').value.trim();
+  let ok = false;
+  try { ok = /^https:$/.test(new URL(url).protocol); } catch { ok = false; }
+  if (!ok) { message('ai-add-info', 'リンクは https:// で始まるアドレスを入れてください。', true); return; }
+  ai.links.push({ name: name || new URL(url).hostname, url });
+  ai.sel = ai.links.length - 1;
+  aiSave(); aiRender();
+  $('ai-name').value = ''; $('ai-url').value = '';
+  message('ai-add-info', `${circled(ai.sel)} として追加し、選びました。`);
+});
+aiLoad();
+aiRender();
+
 $('to-claude').addEventListener('click', async () => {
   if (!state.csvText) return;
+  const link = ai.links[ai.sel];
+  // 分析ページ（Artifact）はCSVをそのまま読む。それ以外（プロジェクトやチャット）は、
+  // 「アプリから届いた」と分かるよう、1行目に出どころを書く
+  const isArtifact = /\/artifact\//.test(link?.url || '');
+  const text = isArtifact ? state.csvText : `アプリ「ムービー・モーションキャプチャ」の「AI分析」から送った骨格データ（CSV）です。\n\n${state.csvText}`;
   // コピーとページを開く操作は、押した直後に続けて行う（iPhoneで止められないように）
-  // プロジェクトの指示が「アプリから届いたとき」を見分けられるよう、1行目に出どころを書く
-  const text = `アプリ「ムービー・モーションキャプチャ」の「Claudeで分析」から送った骨格データ（CSV）です。\n\n${state.csvText}`;
   const copy = navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject(new Error('no clipboard'));
-  if (ANALYSIS_URL) window.open(ANALYSIS_URL, '_blank');
+  if (link) window.open(link.url, '_blank');
   try {
     await copy;
-    message('claude-info', ANALYSIS_URL ? '骨格データをコピーしました。開いたプロジェクトで新しいチャットを始め、データを貼り付けて、動画を添えて送ってください。' : '骨格データをコピーしました。');
+    message('claude-info', `骨格データをコピーし、${link ? `「${link.name}」` : ''}を開きました。${isArtifact ? '開いたページで動画を選び、データを貼り付けて「分析する」を押してください。' : '新しいチャットを始め、データを貼り付けて、動画を添えて送ってください。'}`);
   } catch {
-    message('claude-info', 'コピーできませんでした。「CSVを保存」で保存してから渡してください。', true);
+    message('claude-info', 'コピーできませんでした。「CSVをコピー」か「CSVを保存」で渡してください。', true);
   }
 });
 

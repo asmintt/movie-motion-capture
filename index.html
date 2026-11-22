@@ -158,8 +158,22 @@
     </div>
     <p class="hint" id="copy-info" hidden></p>
     <p class="hint">手元に残したいときだけ保存します。動画は写真アプリへ、CSVは「ファイル」アプリへ。「CSVをコピー」は、ファイルにせずにメモやチャットへ貼り付けたいときに使います。</p>
-    <h2 class="sub-step"><span class="num">6</span>Claudeで分析する</h2>
-    <button type="button" class="btn primary" id="to-claude" disabled>Claudeで分析</button>
+    <h2 class="sub-step"><span class="num">6</span>AI分析</h2>
+    <p class="hint">骨格データをコピーして、選んだ分析先を開きます。分析先は追加・削除できます（このiPhoneに保存されます）。</p>
+    <fieldset class="ai-links">
+      <legend>分析先</legend>
+      <div id="ai-list"></div>
+    </fieldset>
+    <details class="ai-add">
+      <summary>分析先を追加する</summary>
+      <div class="grid">
+        <label class="field"><span>名前</span><input type="text" id="ai-name" placeholder="例：プロジェクト「ダンス練習分析」" maxlength="40"></label>
+        <label class="field"><span>リンク（https:// で始まるアドレス）</span><input type="url" id="ai-url" placeholder="https://claude.ai/..." inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      </div>
+      <button type="button" class="btn small" id="ai-add-btn">追加する</button>
+      <p class="hint" id="ai-add-info"></p>
+    </details>
+    <button type="button" class="btn primary" id="to-claude" disabled>AI分析を開く</button>
     <p class="hint" id="claude-info"></p>
   </section>
 
