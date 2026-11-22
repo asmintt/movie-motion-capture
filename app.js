@@ -801,7 +801,7 @@ $('to-analyze').addEventListener('click', async () => {
   lockFrom('step-export');
   $('save-video').disabled = $('save-csv').disabled = $('copy-csv').disabled = $('to-claude').disabled = true;
   $('copy-info').hidden = true;
-  message('claude-info', '1〜5で解析が終わると押せるようになります。前に保存したデータで分析するときは、下の7を使ってください。');
+  message('claude-info', '');
   $('result-wrap').hidden = true;
   state.busy = true;
   await keepAwake(true);
@@ -1400,7 +1400,7 @@ function showResult(noVideo) {
       ? 'この端末では動画を書き出せませんでした（iPhoneはiOS 16.4以降のSafariが必要です）。CSVは保存できます。'
       : '動画を書き出せませんでした。CSVは保存できます。', true);
   }
-  message('claude-info', '先に「動画を保存」してから押してください。開いた先に骨格データを貼り付け、保存した動画を添えて使います。');
+  message('claude-info', '');
   $('step-export').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
@@ -1487,10 +1487,10 @@ async function openAi(csvText, infoId) {
   const copy = !text ? Promise.resolve(false) : navigator.clipboard ? navigator.clipboard.writeText(text).then(() => true) : Promise.reject(new Error('no clipboard'));
   if (link) window.open(link.url, '_blank');
   const name = link ? link.name : '分析先';
-  const next = isArtifact ? '開いたページで動画を選び、データを貼り付けて「分析する」を押してください。' : '新しいチャットを始め、データを貼り付けて、動画を添えて送ってください。';
+  const next = isArtifact ? '開いたページで動画を選び、データを貼り付けて「分析する」を押してください。' : '新しいチャットを始め、データを貼り付けて、添付ボタンから動画を選んで送ってください。';
   try {
     const copied = await copy;
-    message(infoId, copied ? `骨格データをコピーし、${name}を開きました。${next}` : `${name}を開きました（骨格データはないので、コピーしていません）。動画を添えて、見てほしいことを書いて送ってください。`);
+    message(infoId, copied ? `骨格データをコピーし、${name}を開きました。${next}` : `${name}を開きました（骨格データはないので、コピーしていません）。添付ボタンから動画を選び、見てほしいことを書いて送ってください。`);
   } catch {
     message(infoId, `${name}を開きましたが、骨格データをコピーできませんでした。CSVファイルを添えて送ってください。`, true);
   }
@@ -1508,7 +1508,7 @@ function pastUpdate() {
   const rows = pastCsv().split(/\r?\n/).filter((l) => l.trim() && !l.startsWith('#')).length;
   message('past-csv-info', pastCsv() ? `${$('past-csv').value.trim() ? '貼り付けたデータ' : past.csvFile.name}（${Math.max(0, rows - 1)}行）` : '');
   const files = pastFiles();
-  $('past-share').hidden = !(files.length && navigator.canShare && navigator.canShare({ files }));
+  $('past-share').disabled = !(files.length && navigator.canShare && navigator.canShare({ files }));
 }
 function pastFiles() {
   const f = [];
@@ -1529,12 +1529,14 @@ $('past-csv-file').addEventListener('change', async (e) => {
 });
 $('past-csv').addEventListener('input', pastUpdate);
 $('past-open').addEventListener('click', () => openAi(pastCsv(), 'past-info'));
+// ファイルの共有ができる端末（iPhoneのSafariなど）でだけ、「動画ごと送る」を出す
+try { $('share-block').hidden = !(navigator.canShare && navigator.canShare({ files: [new File(['x'], 'x.csv', { type: 'text/csv' })] })); } catch { $('share-block').hidden = true; }
 $('past-share').addEventListener('click', async () => {
   try {
     await navigator.share({ files: pastFiles(), title: '練習の動画と骨格データ' });
-    message('past-info', '共有メニューから送りました。');
+    message('share-info', '共有メニューから送りました。');
   } catch (e) {
-    if (e?.name !== 'AbortError') message('past-info', '共有できませんでした。「AI分析を開く」を使ってください。', true);
+    if (e?.name !== 'AbortError') message('share-info', '共有できませんでした。上の「CSVをコピーして分析先を開く」を使い、動画は開いた先で添付してください。', true);
   }
 });
 
