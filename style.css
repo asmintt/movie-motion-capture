@@ -141,11 +141,9 @@ input[type="text"], input[type="url"] {
   min-height: 44px; padding: 6px 10px; width: 100%; min-width: 0;
 }
 
-/* 7：共有メニューで送るブロック（上の操作と分けて見せる） */
-.share-block { display: grid; gap: 10px; margin-top: 6px; padding-top: 14px; border-top: 1px solid var(--line); }
-.share-block h3 { font-size: 16px; margin: 0; }
-.share-block b { color: var(--ink); }
-.notice p + p { margin-top: 2px; }
+.ai-box { display: grid; gap: 10px; }
+.ai-prompt { font-family: inherit; }
+.ai-prompt-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 
 /* 長押しで出る拡大鏡。指で隠れないよう、指の少し上に出す */
 #loupe {

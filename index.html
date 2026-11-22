@@ -163,51 +163,19 @@
   <!-- 6. AI分析する（1〜5で解析が終わるまでは、見出しだけのグレー表示） -->
   <section class="step" id="step-ai" data-state="locked">
     <h2><span class="num">6</span>AI分析する</h2>
-    <p class="hint">1〜5で解析した骨格データをコピーして、選んだ分析先を開きます。分析先は追加・削除できます（このiPhoneに保存されます）。</p>
+    <p class="hint">動画もCSVも、分析させたいAIの画面で添付してください。</p>
     <div class="ai-box" data-box="6"></div>
-    <button type="button" class="btn primary" id="to-claude" disabled>CSVをコピーして分析先を開く</button>
+    <button type="button" class="btn primary" id="to-claude" disabled>選択したAIリンクを開く</button>
     <p class="hint" id="claude-info"></p>
-    <div class="notice">
-      <p class="notice-title">動画は、開いた先で添付してください</p>
-      <p>このアプリから分析先へ、動画を直接渡すことはできません。先に「動画を保存」で写真アプリに保存し、開いたチャットの添付ボタンから選んでください。</p>
-    </div>
   </section>
 
   <!-- 7. 過去のデータよりAI分析する（いつでも使える） -->
   <section class="step" id="step-past" data-state="active">
     <h2><span class="num">7</span>過去のデータよりAI分析する</h2>
-    <p class="hint">前に保存したCSVを使って、AI分析だけを行います。上の1〜5をしなくても使えます。</p>
-    <div class="field">
-      <span>骨格データ（CSV・任意）</span>
-      <label class="btn file-btn">
-        <input type="file" id="past-csv-file" accept=".csv,text/csv,text/plain">
-        CSVファイルを選ぶ
-      </label>
-      <textarea id="past-csv" rows="4" placeholder="またはCSVの中身をここに貼り付け" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
-      <span class="hint" id="past-csv-info"></span>
-    </div>
+    <p class="hint">動画もCSVも、分析させたいAIの画面で添付してください。</p>
     <div class="ai-box" data-box="7"></div>
-    <button type="button" class="btn primary" id="past-open">CSVをコピーして分析先を開く</button>
+    <button type="button" class="btn primary" id="past-open">選択したAIリンクを開く</button>
     <p class="hint" id="past-info"></p>
-    <div class="notice">
-      <p class="notice-title">動画は、開いた先で添付してください</p>
-      <p>このアプリから分析先へ、動画を直接渡すことはできません（iPhoneとブラウザの決まりのため）。開いたチャットの添付ボタンから、写真アプリに保存した動画を選んでください。</p>
-    </div>
-
-    <div class="share-block" id="share-block" hidden>
-      <h3>Claudeのアプリへ、動画ごと送る</h3>
-      <p class="hint">iPhoneの共有メニューで、動画とCSVのファイルを送ります。<b>送り先は共有メニューで自分で選びます</b>（上の「分析先」は使われません）。Claudeのアプリを選ぶと新しいチャットに添付されますが、プロジェクトの中に入らないことがあります。</p>
-      <div class="field">
-        <span>動画</span>
-        <label class="btn file-btn">
-          <input type="file" id="past-video" accept="video/*">
-          動画を選ぶ
-        </label>
-        <span class="hint" id="past-video-info">まだ選んでいません（CSVは上で入れたものを一緒に送ります）</span>
-      </div>
-      <button type="button" class="btn" id="past-share" disabled>動画とCSVを共有メニューで送る</button>
-      <p class="hint" id="share-info"></p>
-    </div>
   </section>
 
   <footer class="foot">
