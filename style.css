@@ -119,7 +119,7 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 .ai-links { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px 10px; margin: 0; min-width: 0; }
 .ai-links legend { font-size: 14px; color: var(--muted); padding: 0 4px; }
 .ai-item { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
-.ai-item:first-child { border-top: none; }
+.ai-item:first-child, .ai-links legend + .ai-item { border-top: none; }
 .ai-item label { flex: 1; display: flex; align-items: flex-start; gap: 10px; min-width: 0; cursor: pointer; }
 .ai-item input[type="radio"] { width: 22px; height: 22px; margin: 2px 0 0; flex: none; accent-color: var(--ink); }
 .ai-item .ai-text { min-width: 0; }
@@ -129,6 +129,12 @@ input[type="range"] { width: 100%; accent-color: var(--ink); }
 .ai-add { font-size: 14px; }
 .ai-add summary { cursor: pointer; color: var(--ink); font-weight: 700; min-height: 32px; }
 .ai-add[open] { display: grid; gap: 10px; }
+textarea {
+  font: inherit; font-size: 16px; color: var(--ink);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+  padding: 8px 10px; width: 100%; min-width: 0; resize: vertical;
+  font-family: ui-monospace, Menlo, monospace; line-height: 1.5; /* 16px：iPhoneで入力時に画面が拡大されないように */
+}
 input[type="text"], input[type="url"] {
   font: inherit; font-size: 16px; color: var(--ink);
   background: var(--bg); border: 1px solid var(--line); border-radius: 10px;

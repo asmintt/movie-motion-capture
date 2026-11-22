@@ -158,23 +158,40 @@
     </div>
     <p class="hint" id="copy-info" hidden></p>
     <p class="hint">手元に残したいときだけ保存します。動画は写真アプリへ、CSVは「ファイル」アプリへ。「CSVをコピー」は、ファイルにせずにメモやチャットへ貼り付けたいときに使います。</p>
-    <h2 class="sub-step"><span class="num">6</span>AI分析</h2>
+    <h2 class="sub-step"><span class="num">6</span>AI分析する</h2>
     <p class="hint">骨格データをコピーして、選んだ分析先を開きます。分析先は追加・削除できます（このiPhoneに保存されます）。</p>
-    <fieldset class="ai-links">
-      <legend>分析先</legend>
-      <div id="ai-list"></div>
-    </fieldset>
-    <details class="ai-add">
-      <summary>分析先を追加する</summary>
-      <div class="grid">
-        <label class="field"><span>名前</span><input type="text" id="ai-name" placeholder="例：プロジェクト「ダンス練習分析」" maxlength="40"></label>
-        <label class="field"><span>リンク（https:// で始まるアドレス）</span><input type="url" id="ai-url" placeholder="https://claude.ai/..." inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
-      </div>
-      <button type="button" class="btn small" id="ai-add-btn">追加する</button>
-      <p class="hint" id="ai-add-info"></p>
-    </details>
+    <div class="ai-box" data-box="6"></div>
     <button type="button" class="btn primary" id="to-claude" disabled>AI分析を開く</button>
     <p class="hint" id="claude-info"></p>
+  </section>
+
+  <!-- 7. 過去のデータよりAI分析する（いつでも使える） -->
+  <section class="step" id="step-past" data-state="active">
+    <h2><span class="num">7</span>過去のデータよりAI分析する</h2>
+    <p class="hint">前に保存した骨格つき動画やCSVを使って、AI分析だけを行います。どちらも任意です。上の1〜5をしなくても使えます。</p>
+    <div class="field">
+      <span>動画（任意）</span>
+      <label class="btn file-btn">
+        <input type="file" id="past-video" accept="video/*">
+        動画を選ぶ
+      </label>
+      <span class="hint" id="past-video-info">まだ選んでいません</span>
+    </div>
+    <div class="field">
+      <span>骨格データ（CSV・任意）</span>
+      <label class="btn file-btn">
+        <input type="file" id="past-csv-file" accept=".csv,text/csv,text/plain">
+        CSVファイルを選ぶ
+      </label>
+      <textarea id="past-csv" rows="4" placeholder="またはCSVの中身をここに貼り付け" spellcheck="false" autocapitalize="off" autocorrect="off"></textarea>
+      <span class="hint" id="past-csv-info"></span>
+    </div>
+    <div class="ai-box" data-box="7"></div>
+    <div class="actions">
+      <button type="button" class="btn primary" id="past-open">AI分析を開く</button>
+      <button type="button" class="btn" id="past-share" hidden>動画とCSVを共有で送る</button>
+    </div>
+    <p class="hint" id="past-info">「AI分析を開く」はCSVをコピーしてから分析先を開きます。動画は、開いた先のチャットやページで添えてください。「共有で送る」は、動画とCSVのファイルをiPhoneの共有メニューで、Claudeのアプリなどへ送ります。</p>
   </section>
 
   <footer class="foot">

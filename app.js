@@ -1414,65 +1414,125 @@ function aiSave() {
   try { localStorage.setItem(AI_KEY, JSON.stringify(ai.links)); localStorage.setItem(AI_SEL_KEY, String(ai.sel)); } catch { /* 保存できない端末 */ }
 }
 const circled = (n) => (n < 20 ? String.fromCharCode(0x2460 + n) : `${n + 1}.`);
+// 分析先の一覧と追加フォームを、6と7の両方の .ai-box に描く（中身は同じで、選んだものも連動する）
 function aiRender() {
-  const list = $('ai-list');
-  list.textContent = '';
-  ai.links.forEach((l, n) => {
-    const row = document.createElement('div');
-    row.className = 'ai-item';
-    const lab = document.createElement('label');
-    const r = document.createElement('input');
-    r.type = 'radio'; r.name = 'ai-sel'; r.checked = n === ai.sel;
-    r.addEventListener('change', () => { ai.sel = n; aiSave(); });
-    const txt = document.createElement('span');
-    txt.className = 'ai-text';
-    const nm = document.createElement('span'); nm.className = 'ai-name'; nm.textContent = `${circled(n)} ${l.name || 'リンク'}`;
-    const u = document.createElement('span'); u.className = 'ai-url'; u.textContent = l.url;
-    txt.append(nm, u); lab.append(r, txt);
-    const del = document.createElement('button');
-    del.type = 'button'; del.className = 'btn small'; del.textContent = '削除';
-    del.setAttribute('aria-label', `${l.name || 'リンク'}を削除`);
-    del.disabled = ai.links.length <= 1; // 1つは残す
-    del.addEventListener('click', () => {
-      if (!confirm(`「${l.name || l.url}」を分析先から削除しますか？`)) return;
-      ai.links.splice(n, 1);
-      if (ai.sel >= ai.links.length) ai.sel = ai.links.length - 1; else if (ai.sel > n) ai.sel--;
-      aiSave(); aiRender();
+  for (const box of document.querySelectorAll('.ai-box')) {
+    const id = box.dataset.box;
+    box.textContent = '';
+    const fs = document.createElement('fieldset');
+    fs.className = 'ai-links';
+    const lg = document.createElement('legend'); lg.textContent = '分析先'; fs.append(lg);
+    ai.links.forEach((l, n) => {
+      const row = document.createElement('div');
+      row.className = 'ai-item';
+      const lab = document.createElement('label');
+      const r = document.createElement('input');
+      r.type = 'radio'; r.name = `ai-sel-${id}`; r.checked = n === ai.sel;
+      r.addEventListener('change', () => { ai.sel = n; aiSave(); aiRender(); });
+      const txt = document.createElement('span');
+      txt.className = 'ai-text';
+      const nm = document.createElement('span'); nm.className = 'ai-name'; nm.textContent = `${circled(n)} ${l.name || 'リンク'}`;
+      const u = document.createElement('span'); u.className = 'ai-url'; u.textContent = l.url;
+      txt.append(nm, u); lab.append(r, txt);
+      const del = document.createElement('button');
+      del.type = 'button'; del.className = 'btn small'; del.textContent = '削除';
+      del.setAttribute('aria-label', `${l.name || 'リンク'}を削除`);
+      del.disabled = ai.links.length <= 1; // 1つは残す
+      del.addEventListener('click', () => {
+        if (!confirm(`「${l.name || l.url}」を分析先から削除しますか？`)) return;
+        ai.links.splice(n, 1);
+        if (ai.sel >= ai.links.length) ai.sel = ai.links.length - 1; else if (ai.sel > n) ai.sel--;
+        aiSave(); aiRender();
+      });
+      row.append(lab, del);
+      fs.append(row);
     });
-    row.append(lab, del);
-    list.append(row);
-  });
+    const det = document.createElement('details');
+    det.className = 'ai-add';
+    det.innerHTML = `<summary>分析先を追加する</summary>
+      <div class="grid">
+        <label class="field"><span>名前</span><input type="text" class="ai-name-in" placeholder="例：プロジェクト「ダンス練習分析」" maxlength="40"></label>
+        <label class="field"><span>リンク（https:// で始まるアドレス）</span><input type="url" class="ai-url-in" placeholder="https://claude.ai/..." inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      </div>
+      <button type="button" class="btn small ai-add-btn">追加する</button>
+      <p class="hint ai-add-info"></p>`;
+    det.querySelector('.ai-add-btn').addEventListener('click', () => {
+      const name = det.querySelector('.ai-name-in').value.trim();
+      const url = det.querySelector('.ai-url-in').value.trim();
+      const info = det.querySelector('.ai-add-info');
+      let ok = false;
+      try { ok = new URL(url).protocol === 'https:'; } catch { ok = false; }
+      if (!ok) { info.textContent = 'リンクは https:// で始まるアドレスを入れてください。'; info.classList.add('error'); return; }
+      ai.links.push({ name: name || new URL(url).hostname, url });
+      ai.sel = ai.links.length - 1;
+      aiSave(); aiRender();
+      const again = document.querySelector(`.ai-box[data-box="${id}"] .ai-add`);
+      again.open = true;
+      again.querySelector('.ai-add-info').textContent = `${circled(ai.sel)} として追加し、選びました。`;
+    });
+    box.append(fs, det);
+  }
 }
-$('ai-add-btn').addEventListener('click', () => {
-  const name = $('ai-name').value.trim();
-  const url = $('ai-url').value.trim();
-  let ok = false;
-  try { ok = /^https:$/.test(new URL(url).protocol); } catch { ok = false; }
-  if (!ok) { message('ai-add-info', 'リンクは https:// で始まるアドレスを入れてください。', true); return; }
-  ai.links.push({ name: name || new URL(url).hostname, url });
-  ai.sel = ai.links.length - 1;
-  aiSave(); aiRender();
-  $('ai-name').value = ''; $('ai-url').value = '';
-  message('ai-add-info', `${circled(ai.sel)} として追加し、選びました。`);
-});
 aiLoad();
 aiRender();
 
-$('to-claude').addEventListener('click', async () => {
-  if (!state.csvText) return;
+// 分析先を開く。CSVがあればコピーしてから。Artifactの分析ページにはCSVだけ、それ以外は「アプリから送った」の1行を付ける
+async function openAi(csvText, infoId) {
   const link = ai.links[ai.sel];
-  // 分析ページ（Artifact）はCSVをそのまま読む。それ以外（プロジェクトやチャット）は、
-  // 「アプリから届いた」と分かるよう、1行目に出どころを書く
   const isArtifact = /\/artifact\//.test(link?.url || '');
-  const text = isArtifact ? state.csvText : `アプリ「ムービー・モーションキャプチャ」の「AI分析」から送った骨格データ（CSV）です。\n\n${state.csvText}`;
+  const text = !csvText ? '' : isArtifact ? csvText : `アプリ「ムービー・モーションキャプチャ」の「AI分析」から送った骨格データ（CSV）です。\n\n${csvText}`;
   // コピーとページを開く操作は、押した直後に続けて行う（iPhoneで止められないように）
-  const copy = navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject(new Error('no clipboard'));
+  const copy = !text ? Promise.resolve(false) : navigator.clipboard ? navigator.clipboard.writeText(text).then(() => true) : Promise.reject(new Error('no clipboard'));
   if (link) window.open(link.url, '_blank');
+  const name = link ? link.name : '分析先';
+  const next = isArtifact ? '開いたページで動画を選び、データを貼り付けて「分析する」を押してください。' : '新しいチャットを始め、データを貼り付けて、動画を添えて送ってください。';
   try {
-    await copy;
-    message('claude-info', `骨格データをコピーし、${link ? `「${link.name}」` : ''}を開きました。${isArtifact ? '開いたページで動画を選び、データを貼り付けて「分析する」を押してください。' : '新しいチャットを始め、データを貼り付けて、動画を添えて送ってください。'}`);
+    const copied = await copy;
+    message(infoId, copied ? `骨格データをコピーし、${name}を開きました。${next}` : `${name}を開きました（骨格データはないので、コピーしていません）。動画を添えて、見てほしいことを書いて送ってください。`);
   } catch {
-    message('claude-info', 'コピーできませんでした。「CSVをコピー」か「CSVを保存」で渡してください。', true);
+    message(infoId, `${name}を開きましたが、骨格データをコピーできませんでした。CSVファイルを添えて送ってください。`, true);
+  }
+}
+
+$('to-claude').addEventListener('click', () => {
+  if (!state.csvText) return;
+  openAi(state.csvText, 'claude-info');
+});
+
+// ---- 7. 過去のデータよりAI分析する ----
+const past = { video: null, csvFile: null, csvFileText: '' };
+const pastCsv = () => ($('past-csv').value.trim() || past.csvFileText || '').replace(/^\uFEFF/, '');
+function pastUpdate() {
+  const rows = pastCsv().split(/\r?\n/).filter((l) => l.trim() && !l.startsWith('#')).length;
+  message('past-csv-info', pastCsv() ? `${$('past-csv').value.trim() ? '貼り付けたデータ' : past.csvFile.name}（${Math.max(0, rows - 1)}行）` : '');
+  const files = pastFiles();
+  $('past-share').hidden = !(files.length && navigator.canShare && navigator.canShare({ files }));
+}
+function pastFiles() {
+  const f = [];
+  if (past.video) f.push(past.video);
+  if (past.csvFile && !$('past-csv').value.trim()) f.push(past.csvFile);
+  else if (pastCsv()) f.push(new File(['\uFEFF' + pastCsv()], 'skeleton_MediaPipePose.csv', { type: 'text/csv' }));
+  return f;
+}
+$('past-video').addEventListener('change', (e) => {
+  past.video = e.target.files[0] || null;
+  message('past-video-info', past.video ? `${past.video.name}（${(past.video.size / 1e6).toFixed(1)}MB）` : 'まだ選んでいません');
+  pastUpdate();
+});
+$('past-csv-file').addEventListener('change', async (e) => {
+  past.csvFile = e.target.files[0] || null;
+  past.csvFileText = past.csvFile ? await past.csvFile.text() : '';
+  pastUpdate();
+});
+$('past-csv').addEventListener('input', pastUpdate);
+$('past-open').addEventListener('click', () => openAi(pastCsv(), 'past-info'));
+$('past-share').addEventListener('click', async () => {
+  try {
+    await navigator.share({ files: pastFiles(), title: '練習の動画と骨格データ' });
+    message('past-info', '共有メニューから送りました。');
+  } catch (e) {
+    if (e?.name !== 'AbortError') message('past-info', '共有できませんでした。「AI分析を開く」を使ってください。', true);
   }
 });
 
