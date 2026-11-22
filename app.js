@@ -801,6 +801,7 @@ $('to-analyze').addEventListener('click', async () => {
   lockFrom('step-export');
   $('save-video').disabled = $('save-csv').disabled = $('copy-csv').disabled = $('to-claude').disabled = true;
   $('copy-info').hidden = true;
+  message('claude-info', '1〜5で解析が終わると押せるようになります。前に保存したデータで分析するときは、下の7を使ってください。');
   $('result-wrap').hidden = true;
   state.busy = true;
   await keepAwake(true);

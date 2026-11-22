@@ -158,11 +158,15 @@
     </div>
     <p class="hint" id="copy-info" hidden></p>
     <p class="hint">手元に残したいときだけ保存します。動画は写真アプリへ、CSVは「ファイル」アプリへ。「CSVをコピー」は、ファイルにせずにメモやチャットへ貼り付けたいときに使います。</p>
-    <h2 class="sub-step"><span class="num">6</span>AI分析する</h2>
-    <p class="hint">骨格データをコピーして、選んだ分析先を開きます。分析先は追加・削除できます（このiPhoneに保存されます）。</p>
+  </section>
+
+  <!-- 6. AI分析する（分析先はいつでも選べる。ボタンは1〜5で解析が終わると押せる） -->
+  <section class="step" id="step-ai" data-state="active">
+    <h2><span class="num">6</span>AI分析する</h2>
+    <p class="hint">1〜5で解析した骨格データをコピーして、選んだ分析先を開きます。分析先は追加・削除できます（このiPhoneに保存されます）。</p>
     <div class="ai-box" data-box="6"></div>
     <button type="button" class="btn primary" id="to-claude" disabled>AI分析を開く</button>
-    <p class="hint" id="claude-info"></p>
+    <p class="hint" id="claude-info">1〜5で解析が終わると押せるようになります。前に保存したデータで分析するときは、下の7を使ってください。</p>
   </section>
 
   <!-- 7. 過去のデータよりAI分析する（いつでも使える） -->
