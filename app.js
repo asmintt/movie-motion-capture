@@ -67,7 +67,7 @@ const preview = $('preview'); // 設定用のプレビュー
 let source = video;
 
 // ---------- 画面の状態 ----------
-const STEPS = ['step-file', 'step-settings', 'step-pick', 'step-analyze', 'step-export'];
+const STEPS = ['step-file', 'step-settings', 'step-pick', 'step-analyze', 'step-export', 'step-ai'];
 // 解析する対象に先生・初心者が入っているか
 const needT = () => state.target !== 'beginner';
 const needB = () => state.target !== 'teacher';
@@ -1386,6 +1386,7 @@ async function analyze() {
 // ---------- 5. 保存・6. Claudeで分析 ----------
 function showResult(noVideo) {
   setStep('step-export', 'active');
+  setStep('step-ai', 'active');
   $('save-csv').disabled = false;
   $('copy-csv').disabled = false;
   $('to-claude').disabled = false;
