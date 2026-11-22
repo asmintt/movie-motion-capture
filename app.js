@@ -38,6 +38,9 @@ const BONES = [
   [23, 25], [25, 27], [24, 26], [26, 28],
   [27, 29], [29, 31], [27, 31], [28, 30], [30, 32], [28, 32],
 ];
+// 本人の右側の目印として太く描く骨：右の肩→肘、右の膝→足首→かかと
+const BOLD_BONES = new Set(['12-14', '26-28', '28-30']);
+const BOLD_SCALE = 2;
 // 丸を描く点。31・32 はAIの「つま先」（foot_index）で、靴の先にあたる
 const JOINTS = [11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28, 31, 32];
 
@@ -424,6 +427,7 @@ function drawSkeleton(ctx, p, color) {
   for (const [i, j] of BONES) {
     const vi = p[i * 3 + 2], vj = p[j * 3 + 2];
     if (vi < 0.05 || vj < 0.05) continue;
+    ctx.lineWidth = BOLD_BONES.has(`${i}-${j}`) ? lw * BOLD_SCALE : lw;
     ctx.strokeStyle = vi >= VIS_MIN && vj >= VIS_MIN ? color : COLOR.low;
     ctx.beginPath();
     ctx.moveTo(p[i * 3] * W, p[i * 3 + 1] * H);
