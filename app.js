@@ -5,6 +5,23 @@ import { PoseLandmarker } from './lib/vision_bundle.mjs';
 import { Muxer, ArrayBufferTarget } from './lib/mp4-muxer.mjs';
 
 const APP_VERSION = 'v3';
+// 公開した版の番号。tools/bump-build.sh が index.html・version.json と一緒に書き換える
+const APP_BUILD = '20261122133527';
+// 古い画面が残っていたら、新しい版に読み込み直す（GitHub Pagesはブラウザが最大10分ほど古いものを使うため）
+(async () => {
+  try {
+    const r = await fetch(`version.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (!r.ok) return;
+    const { build } = await r.json();
+    if (!build || build === APP_BUILD) return;
+    const key = `mmc.reloaded.${build}`;
+    if (sessionStorage.getItem(key)) return; // 1回だけ（読み込み直しても古いままのときに繰り返さない）
+    sessionStorage.setItem(key, '1');
+    const u = new URL(location.href);
+    u.searchParams.set('v', build);
+    location.replace(u.href);
+  } catch { /* 確かめられないときは、そのまま使う */ }
+})();
 // 骨格AIを動かすのは毎秒10コマ。書き出す動画の間のコマは、前後の結果から補間する
 const ANALYZE_FPS = 10;
 // 「AI分析」の分析先。はじめから入っているもの（利用者が追加・削除でき、端末に保存する）

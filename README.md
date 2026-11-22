@@ -47,3 +47,12 @@ cd ~/Desktop/movie-motion-capture && python3 -m http.server 8765
 ```
 
 ブラウザで http://localhost:8765/ を開く。
+
+## 公開するとき
+
+```bash
+cd ~/Desktop/movie-motion-capture && ./tools/bump-build.sh && git commit -am "版の番号を更新" && git push origin main
+```
+
+`tools/bump-build.sh` が版の番号（日時）を `index.html`・`app.js`・`version.json` に書き込む。古い画面を開いた人は、起動時に `version.json` と比べて、自動で新しい版に読み込み直される。
+
