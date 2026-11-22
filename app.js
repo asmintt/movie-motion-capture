@@ -7,8 +7,10 @@ import { Muxer, ArrayBufferTarget } from './lib/mp4-muxer.mjs';
 const APP_VERSION = 'v3';
 // 骨格AIを動かすのは毎秒10コマ。書き出す動画の間のコマは、前後の結果から補間する
 const ANALYZE_FPS = 10;
-// 分析用Artifact「ダンス練習分析」のURL。作ったらここに入れる（空のあいだはコピーだけ行う）
-const ANALYSIS_URL = 'https://claude.ai/artifact/M5aJy3Tk7ZBjCZ2r7NHmX9';
+// 「Claudeで分析」で開く、Claudeのプロジェクト「ダンス練習分析」のURL（空のあいだはコピーだけ行う）
+// プロジェクトの「指示」欄の文が、そこで始めたチャットに効く
+const ANALYSIS_URL = 'https://claude.ai/cowork/project/01a1ba4c-287f-7339-9813-4383ee2d5fb7';
+// 以前使っていた分析ページ（Artifact）：https://claude.ai/artifact/M5aJy3Tk7ZBjCZ2r7NHmX9
 const MEDIAPIPE_VERSION = 'tasks-vision 0.10.14';
 
 const $ = (id) => document.getElementById(id);
@@ -1395,19 +1397,21 @@ function showResult(noVideo) {
       : '動画を書き出せませんでした。CSVは保存できます。', true);
   }
   message('claude-info', ANALYSIS_URL
-    ? '先に「動画を保存」してから押してください。骨格データをコピーして分析ページを開きます。開いたら、保存した動画を選び、データを貼り付けて「分析する」を押します。'
-    : '分析用のページ（Artifact）のリンクがまだ入っていないので、今は骨格データのコピーだけ行います。');
+    ? '先に「動画を保存」してから押してください。骨格データをコピーして、Claudeのプロジェクト「ダンス練習分析」を開きます。開いたら新しいチャットにデータを貼り付け、保存した動画を添えて、見てほしいことを書いて送ります。'
+    : '分析先のリンクがまだ入っていないので、今は骨格データのコピーだけ行います。');
   $('step-export').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 $('to-claude').addEventListener('click', async () => {
   if (!state.csvText) return;
   // コピーとページを開く操作は、押した直後に続けて行う（iPhoneで止められないように）
-  const copy = navigator.clipboard ? navigator.clipboard.writeText(state.csvText) : Promise.reject(new Error('no clipboard'));
+  // プロジェクトの指示が「アプリから届いたとき」を見分けられるよう、1行目に出どころを書く
+  const text = `アプリ「ムービー・モーションキャプチャ」の「Claudeで分析」から送った骨格データ（CSV）です。\n\n${state.csvText}`;
+  const copy = navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject(new Error('no clipboard'));
   if (ANALYSIS_URL) window.open(ANALYSIS_URL, '_blank');
   try {
     await copy;
-    message('claude-info', ANALYSIS_URL ? '骨格データをコピーしました。開いたページで動画を選び、データを貼り付けてください。' : '骨格データをコピーしました。');
+    message('claude-info', ANALYSIS_URL ? '骨格データをコピーしました。開いたプロジェクトで新しいチャットを始め、データを貼り付けて、動画を添えて送ってください。' : '骨格データをコピーしました。');
   } catch {
     message('claude-info', 'コピーできませんでした。「CSVを保存」で保存してから渡してください。', true);
   }
